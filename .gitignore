@@ -1,0 +1,29 @@
+# --- Never commit game material or anything derived from SPEED2.EXE ---
+# Generated C lifted from the binary (a derivative of proprietary code)
+src/recomp/gen/
+# Build output
+build/
+# Run logs and crash dumps (contain guest memory/addresses)
+logs/*
+!logs/.gitkeep
+# Any copy of game binaries/assets that might land here by accident
+*.EXE
+*.exe
+*.dll
+*.DLL
+*.BIN
+*.BUN
+*.bin
+*.bun
+*.big
+*.BIG
+*.vp6
+*.mad
+*.asf
+*.iso
+# Analysis artefacts that embed binary contents
+work/
+*.analysis.exe
+*.idb
+*.i64
+*.gzf
