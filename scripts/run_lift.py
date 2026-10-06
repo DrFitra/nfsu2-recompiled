@@ -75,6 +75,17 @@ def rebuild(md, img, base, fd):
     return f
 
 
+def read_va_list(path):
+    out = {}
+    if path and os.path.exists(path):
+        for line in open(path):
+            line = line.split("#", 1)[0].strip()
+            if line:
+                parts = line.split(None, 1)
+                out[int(parts[0], 16)] = parts[1] if len(parts) > 1 else ""
+    return out
+
+
 def cmd_lift(exe, catalog, outdir, split=400, names_path=None):
     import pefile
     from lift32 import Lifter
@@ -89,6 +100,9 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None):
     names = {}
     if names_path and os.path.exists(names_path):
         names = {int(k, 16): v for k, v in json.load(open(names_path)).items()}
+    cfg = os.path.join(HERE, "..", "config")
+    overrides = read_va_list(os.path.join(cfg, "overrides.txt"))
+    excluded = read_va_list(os.path.join(cfg, "exclude.txt"))
     md = Cs(CS_ARCH_X86, CS_MODE_32)
     md.detail = True
     lifter = Lifter(iat_map=iat, func_names={}, lifted=lifted, precise_carry=True)
@@ -122,8 +136,18 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None):
     for n, fd in enumerate(fds):
         a = fd["address"]
         try:
-            f = rebuild(md, img, base, fd)
-            code = lifter.lift_function(f)
+            if a in overrides:
+                code = (f"/* OVERRIDE: {overrides[a]} */\n"
+                        f"void sub_{a:08X}(void) {{ recomp_func_t _f = recomp_lookup_manual(0x{a:08X}u);"
+                        f" if (_f) {{ _f(); return; }} RECOMP_UNIMPL(0x{a:08X}u, \"override missing\"); }}")
+                stats["overridden"] += 1
+            elif a in excluded:
+                code = (f"/* EXCLUDED: {excluded[a]} */\n"
+                        f"void sub_{a:08X}(void) {{ RECOMP_UNIMPL(0x{a:08X}u, \"excluded: not code\"); }}")
+                stats["excluded"] += 1
+            else:
+                f = rebuild(md, img, base, fd)
+                code = lifter.lift_function(f)
         except Exception as ex:  # noqa: BLE001
             failed.append((a, repr(ex)))
             code = (f"/* LIFT FAILED: {ex!r} */\n"
@@ -170,6 +194,7 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None):
            "unimplemented_total": sum(unimpl.values()),
            "unimplemented": dict(unimpl.most_common()),
            "unimplemented_sites": dict(unimpl_sites),
+           "overridden": stats["overridden"], "excluded": stats["excluded"],
            "icall_sites": stats["icall_sites"], "itail_sites": stats["itail_sites"],
            "seconds": round(time.time() - t0)}
     json.dump(out, open(os.path.join(outdir, "lift_stats.json"), "w"), indent=1)
