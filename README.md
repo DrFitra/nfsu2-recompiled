@@ -20,8 +20,9 @@ Early bring-up. See [docs/STATUS.md](docs/STATUS.md).
 | Milestone | State |
 |---|---|
 | M0 C generated | **DONE**: 27,742 functions, 8.9 M lines, 0 lift failures |
-| M1 C compiles | IN PROGRESS: sample files compile with MSVC x86 |
-| M2+ link / run | not started |
+| M1 C compiles / M2 links | **DONE**: MSVC x86, 0 errors, ~4.5 min with -j16 |
+| M3 CRT / M4 entry point / M5 WinMain | **DONE**: the game's startup runs recompiled (registry, CPU detection, timer and file threads) |
+| M6 window | BLOCKED: the game itself asks for Disc 2 (the original exe does the same) |
 
 ## Tested game build
 
@@ -71,6 +72,14 @@ python scripts/coverage_gaps.py work/SPEED2.analysis.exe work/catalog.json
 ```
 
 `seeds_all.json` is the union of the two seed files.
+
+Build and run (the host finds the game by walking up to a folder named
+`Need for Speed Underground 2`, or use `--game-root` / `NFSU2_ROOT`):
+
+```bash
+scripts/build.sh                     # cmake + ninja, MSVC x86
+scripts/run.sh [--trace-native]      # logs/run_<stamp>.log, logs/crash_<stamp>.txt on failure
+```
 
 ## Design decisions
 

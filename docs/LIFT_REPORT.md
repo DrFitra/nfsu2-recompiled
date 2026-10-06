@@ -27,4 +27,9 @@ Driver: `scripts/run_lift.py lift` (pcrecomp `lift32` + patched `simd32`),
 ## Compile
 
 - `recomp_0010.c` (42 k lines): MSVC x86 `/O1` 1.4 s, OK.
-- `recomp_0034.c` (1.6 M lines): stopped after ~55 s without a result when work paused. Not yet measured.
+- `recomp_0034.c` (1.6 M lines): MSVC `/O1` 207 s (101 MB object); clang 22 `-O1` 785 s.
+- Whole project (CMake + Ninja, -j16): 4 min 20 s, 0 errors, 0 unresolved symbols at link.
+
+After the first run the lift was regenerated with `lahf`, `fnstenv/fldenv`,
+backward-branch yields, one override (0x6F5FC5) and one exclusion (0x6D5610):
+`RECOMP_UNIMPL` sites 2,907 (2,890 3DNow!, 17 `int` in data/unreachable code).
