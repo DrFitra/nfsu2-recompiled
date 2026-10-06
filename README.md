@@ -104,6 +104,10 @@ scripts/run.sh [--trace-native]      # logs/run_<stamp>.log, logs/crash_<stamp>.
 | 0002 | `lift32`: MMX/SSE/SSE2 via new `simd32.py`; `RECOMP_UNIMPL` instead of silent no-ops; difftest +40 SIMD cases (242/242 vs Unicorn) |
 | 0003 | `RECOMP_STRICT_ICALL`: unresolved ICALL/ITAIL go to a host hook |
 
+## Android
+
+`ICONO/ICONO.png` is the icon of the future Android APK ("Android Evolved").
+
 ## Legal
 
 Code here is MIT-licensed tooling and documentation. Need for Speed and all
