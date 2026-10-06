@@ -42,6 +42,8 @@ add_executable(NFSU2-Recompiled
   src/host/main.c
   src/runtime/nfs_runtime.c
   src/runtime/overrides.c
+  src/runtime/d3d9_trace.c
+  src/runtime/dinput_trace.c
   src/shims/win32_shims.c
   src/platform/nfs_log.c
   ${RT}/native32/native32.c

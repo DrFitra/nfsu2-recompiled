@@ -27,6 +27,11 @@ int nfs_override_count(void);
 extern char g_nfs_game_root[];
 extern char g_nfs_exe_path[];
 
+/* Direct3D 9 tracing (d3d9_trace.c). */
+void nfs_d3d9_trace_init(void);
+void nfs_d3d9_write_report(void);
+uint32_t nfs_d3d9_frames(void);
+
 #define NFS_GUEST_BASE 0x00400000u
 
 #endif

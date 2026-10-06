@@ -65,8 +65,8 @@ static DWORD WINAPI watchdog(void *p) {
         Sleep(5000);
         uint32_t ic = g_icall_count, nat = g_native_ring_idx;
         const char *imp = g_cur_import;
-        NFS_LOG(CPU, "heartbeat: sub_%08X  icalls +%u  native +%u  last import %s",
-                g_cur_func, ic - last_ic, nat - last_nat, imp ? imp : "-");
+        NFS_LOG(CPU, "heartbeat: sub_%08X  icalls +%u  native +%u  frames %u  last import %s",
+                g_cur_func, ic - last_ic, nat - last_nat, nfs_d3d9_frames(), imp ? imp : "-");
         last_ic = ic; last_nat = nat;
         nfs_log_flush();
     }
@@ -171,6 +171,7 @@ int main(int argc, char **argv) {
     /* 3. Machine, image, imports */
     native32_init();
     nfs_install_crash_handler();
+    nfs_d3d9_trace_init();
     /* image_loader commits the image into the reservation the launcher made */
     uint32_t span = native32_map(g_nfs_exe_path, NFS_GUEST_BASE);
     if (!span) { NFS_LOG(BOOT, "mapping SPEED2.EXE at 0x%08X failed", NFS_GUEST_BASE); return 2; }
