@@ -10,15 +10,25 @@ Last update: 2026-10-06. Only what has evidence is marked DONE.
 | M3 CRT initializes | **DONE** | trace: `GetVersionExA`, `HeapCreate`, `TlsAlloc`, `GetStartupInfoA`, environment and locale setup, `_initterm` run through lifted code; `SetUnhandledExceptionFilter(0x766A55)` |
 | M4 original entry point runs | **DONE** | `entering original entry point 0x0075BCC7`; 249 imports bound to Windows, 3 shimmed, 0 unresolved |
 | M5 WinMain | **DONE** | the game's main (0x580E00 → 0x57ED10 → 0x5B7690) runs: single-instance check (Toolhelp process walk), D3DX `DisablePSGP` registry probe, CPU detection, registry settings (`Install Dir`, `Language`…), the multimedia-timer thread (callbacks Windows → lifted code via `timeSetEvent`, ~257/s), the file-system thread |
-| M6 game window | **BLOCKED** | see below |
-| M7 D3D9 init … M12 race | not started | |
+| M6 game window | **DONE** | `RegisterClassExA` + `CreateWindowExA("GameFrame", "NFS Underground 2")` + `ShowWindow`; the guest WndProc `0x5CCD60` receives messages through native32's callback path |
+| M7 D3D9 initialization | **DONE** | `Direct3DCreate9(32)`, `CreateDevice` → `S_OK` (640x480 X8R8G8B8 fullscreen, D24S8) |
+| M8 first frame | **DONE** | `Present` → `S_OK`; 1,320 frames in one run, ~496 D3D calls and 14 draws per frame |
+| M9 EA logo / intro | **DONE** | the intro movies play (seen by the user on screen); 34 vertex + 34 pixel shaders compiled from the exe's effect resources |
+| M10 main menu | IN PROGRESS | movies cannot be skipped: input issue below |
+| M11 garage, M12 race | not started | |
 
-## Current blocker: the game asks for Disc 2
+## Resolved: the game asked for Disc 2
 
 - **Where:** `0x005C0D30` (called from `0x005B76B3` in the game's startup at `0x005B7690`) shows `MessageBoxA("Please insert Disc 2", "NFS Underground 2")`; cancelling calls `exit(0)` (`0x0075D5A4`).
 - **Why:** `0x005BF450` walks drive letters and accepts only `GetDriveTypeA == DRIVE_CDROM` holding the game files; a global at `0x0079DC60` that would also accept other drive types is 0 in the file and is never written by any code. The remaining bypass is the existence of a file named `foobar` in the game folder (`0x0057CAC0("foobar")`), a developer switch.
 - **Evidence that this is the game, not the recompilation:** the **original** `SPEED2.EXE` of this installation, started on the same machine, shows the same `#32770 "NFS Underground 2"` dialog after 10 s (oracle run on 2026-10-06; nothing was modified). The recompiled and original binaries agree up to this point.
-- **Not done on purpose:** no patch or host-side fake of the disc check. Passing it legitimately needs the user's Disc 2 in a drive (or a mounted image of the user's own disc). Whether to use the game's own `foobar` developer switch is the owner's decision.
+- **Resolution (owner's decision):** the owner's installed copy has no disc drive available, and the owner asked to bypass the check. The game's own developer switch is used: an empty file `foobar` was added to GAME_ROOT. Nothing in the game or in the recompilation was patched.
+
+## Current issue: keys do not skip the movies
+
+- Mouse: `IDirectInput8::CreateDevice(GUID_SysMouse)`, `FOREGROUND|EXCLUSIVE`; works while the window has focus, `DIERR_INPUTLOST` / `E_ACCESSDENIED` otherwise (expected).
+- Keyboard/pads come from `IDirectInput8::EnumDevicesBySemantics` (DirectInput action mapping): the device is handed to the guest callback `0x5CA660`. `BuildActionMap` succeeds for 4 action formats and fails with `E_INVALIDARG` for 3; `SetActionMap` returns `DI_SETTINGSNOTSAVED`; `Acquire` and `GetDeviceData` then succeed. Whether `GetDeviceData` ever returns events, and what the 3 failing action maps are, is the next thing to measure.
+- `WM_KEYDOWN` reaches the guest WndProc, which only uses it for the debug console (keys 0x23-0x7B), so window messages are not the game's input path.
 
 ## Viability (lifter)
 
