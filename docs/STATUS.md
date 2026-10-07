@@ -1,5 +1,29 @@
 # Status
 
+## Update 2026-10-07 (evidence from this day's runs)
+
+| Milestone | State | Evidence |
+|---|---|---|
+| M9 EA logo / intro | **DONE** | movies play; the logos are not skippable in the original either (input reaches the pad queue as event 0x26) |
+| M10 main menu | **DONE** | menus navigate with Enter (synthetic DirectInput events, `NFSU2_TAP`) and real keys (user) |
+| Car rendering | **DONE** | career-menu 350Z renders correctly (window capture of the recompiled build) after patch 0009 |
+| Race loading | **DONE** | attract-mode race loads and runs, 5,400+ frames, no crash (was a null read in 0x005E5110) |
+| M11 garage / M12 player-driven race | IN PROGRESS | user reports cars visible and racing; an end-to-end scripted race is not yet in the test set |
+| Audio | **DONE** | stutter fixed by the fair FIFO machine lock (patch 0008) |
+| Performance | open | user reports menu lag at times; profiler available (`NFSU2_PROFILE=1`) |
+
+Root causes fixed today: MSVC /O1-/O2 miscompile of signed tests on
+left-aligned 16-bit lazy flags (found and diagnosed by the project owner,
+patch 0009); x87 TOP missing from `fnstsw`; unfair machine lock (audio);
+missing per-thread xmm/mxcsr/flags in native32 (patch 0011); DirectInput
+needing the host HINSTANCE; guest resources (D3DX effects) not found by
+Windows. Tools added: windowed mode, `NFSU2_BACKGROUND`, `NFSU2_TAP`,
+`NFSU2_NATIVE` (original code as oracle), `NFSU2_NATIVE_RANGE` (hybrid
+bisection), real-function difftest, sampling profiler.
+
+## Earlier entries
+
+
 Last update: 2026-10-06. Only what has evidence is marked DONE.
 
 | Milestone | State | Evidence |

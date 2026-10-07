@@ -34,14 +34,19 @@ cl -nologo -O1 -I../pcrecomp/runtime/recomp32 \
 ```
 
 The baseline pcrecomp header produces 32,768 failures with `/O1`. After
-`patches/pcrecomp/0010-recomp_types-explicit-sign-for-narrow-flags.patch`, the
+`patches/pcrecomp/0009-recomp_types-explicit-sign-tests-for-signed-conditio.patch`, the
 test produces zero failures with `/Od`, `/O1` and `/O2`, covering every
 16-bit value for sign/zero tests and 458,752 signed comparisons per run.
 Separate non-inlined condition functions matter: combining all flag results
 inside one function can hide this optimization discrepancy.
 
-The patch is a plain diff; apply with `git apply` in the pcrecomp checkout.
-It can be applied independently of the native-range debugging patch.
+The patch is part of the `git am` series in `patches/pcrecomp`.
+
+Independent re-check (2026-10-07, MSVC 19.51, same test): original header
+0 / 32,768 / 32,768 failures at /Od / /O1 / /O2; patched header 0 / 0 / 0.
+After the fix the recompiled build reaches a race (the attract-mode demo)
+without the 0x005E5110 crash and renders the career-menu car correctly,
+both verified on window captures of the recompiled build.
 
 ## Game smoke test after the fix
 

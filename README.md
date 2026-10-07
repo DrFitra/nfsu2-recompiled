@@ -58,11 +58,7 @@ Other builds are untested. Details: [docs/NFSU2_BINARY_REPORT.md](docs/NFSU2_BIN
 git clone https://github.com/sp00nznet/pcrecomp.git ../pcrecomp
 cd ../pcrecomp
 git checkout 35548b8
-# Patches 0001-0008 are git-format-patch messages.
-git am ../nfsu2-recompiled/patches/pcrecomp/000[1-8]-*.patch
-# Patches 0009-0010 are plain diffs.
-git apply ../nfsu2-recompiled/patches/pcrecomp/0009-*.patch
-git apply ../nfsu2-recompiled/patches/pcrecomp/0010-*.patch
+git am ../nfsu2-recompiled/patches/pcrecomp/*.patch    # 0001-0011
 ```
 
 ## Pipeline
@@ -105,7 +101,7 @@ The host runs windowed by default; pass `--fullscreen` for fullscreen.
 
 MSVC 19.51 `/O1` miscompiled signed tests of left-aligned 16-bit values,
 allowing negative identifiers into a lookup that then dereferenced NULL.
-Patch 0010 uses explicit sign-bit tests and unsigned signed-order comparisons.
+Patch 0009 uses explicit sign-bit tests and unsigned signed-order comparisons.
 The regression passes with `/Od`, `/O1` and `/O2`; the baseline fails for
 32,768 negative values with `/O1`.
 
@@ -146,8 +142,9 @@ cl -nologo -O1 -I../pcrecomp/runtime/recomp32 \
 | 0006 | Post-call hooks and API names for tracing |
 | 0007 | Pre-call hooks for native argument inspection/rewriting |
 | 0008 | x87 TOP reporting, fair FIFO machine lock and hashed name lookup |
-| 0009 | Optional native execution by address range for hybrid debugging |
-| 0010 | Explicit sign handling for narrow flags to avoid the MSVC optimization regression |
+| 0009 | Explicit sign handling for signed conditions: MSVC /O1-/O2 miscompiled signed tests of left-aligned 16-bit flags (race-load crash, black cars) |
+| 0010 | `RECOMP_NATIVE_RANGE`: run a VA range as the original code, for hybrid bisection |
+| 0011 | native32 saves xmm/mxcsr and the published flags per guest thread |
 
 ## Android
 
