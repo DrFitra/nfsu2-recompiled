@@ -40,6 +40,7 @@ endforeach()
 # ---- host ----
 add_executable(NFSU2-Recompiled
   src/host/main.c
+  src/host/profiler.c
   src/runtime/nfs_runtime.c
   src/runtime/overrides.c
   src/runtime/d3d9_trace.c
@@ -60,4 +61,4 @@ set_source_files_properties(src/host/main.c src/runtime/nfs_runtime.c src/runtim
 target_link_options(NFSU2-Recompiled PRIVATE
   /BASE:0x60000000 /DYNAMICBASE:NO /LARGEADDRESSAWARE /STACK:0x100000
   /DEBUG /SUBSYSTEM:CONSOLE /INCREMENTAL:NO)
-target_link_libraries(NFSU2-Recompiled PRIVATE kernel32 user32)
+target_link_libraries(NFSU2-Recompiled PRIVATE kernel32 user32 winmm dbghelp)
