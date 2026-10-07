@@ -148,13 +148,22 @@ cl -nologo -O1 -I../pcrecomp/runtime/recomp32 \
 
 ## Android
 
-`ICONO/ICONO.png` is the icon of the future Android APK ("Android Evolved").
+The Android APK uses the supplied `ICONO/ICONO.png` icon.
 
-There is no Android APK or ARM64 host yet. The current build requires MSVC
-x86 and real Win32/Direct3D 9. Android needs a portable guest-memory and
-callback model, platform API implementations, graphics translation, audio,
-input and lifecycle integration. The next Windows milestone is a reproducible
-complete race with performance measurements before moving those subsystems.
+The owner has validated Windows gameplay. `android/` builds the locally
+generated game C for ARM64 with portable guest memory, PE loading, serialized
+guest threads and Windows API adaptation. An Android port of pinned DXVK native
+translates real D3D9 calls to Vulkan; the original game's initial splash screen
+has rendered on a Samsung SM-S938B. PCM audio uses AAudio and initial touch
+controls deliver keyboard input. The launcher selects an available game
+language before boot, defaulting to Spanish. Game files are read from internal
+storage `nfsu2`. This is still an unfinished port: menu, races, full input/audio
+coverage and lifecycle behavior are not validated. The tested Vulkan driver
+advertises 1.3, so a Vulkan-1.1-only device is not yet verified.
+See [Android port status and build instructions](docs/ANDROID_PORT.md) for the
+reference review, implemented pieces and remaining runtime/graphics work.
+See [DXVK preparation](ports/dxvk_android/README.md) for required graphics
+dependencies and [current device evidence](docs/ANDROID_INPUT_AUDIO_TEST.md).
 
 ## Legal
 
