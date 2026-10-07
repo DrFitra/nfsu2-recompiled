@@ -15,9 +15,8 @@
 #include "nfs_runtime.h"
 #include "nfs_log.h"
 
-/* ---- SSE register file (recomp_simd.h) ---- */
-V128     g_xmm[8];
-uint32_t g_mxcsr = 0x1F80;
+/* The SSE register file (g_xmm, g_mxcsr) is defined by native32 with the
+ * rest of the register file. */
 
 /* ---- names ---- */
 const char *nfs_native_name(uint32_t va) { return native32_name(va); }
