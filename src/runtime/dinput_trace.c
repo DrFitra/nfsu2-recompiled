@@ -73,6 +73,37 @@ int nfs_dinput_post(uint32_t fn, const uint32_t *a, uint32_t ret) {
         NFS_LOG(WIN32, "dinput: new device object dev%d = %08X (first call %s)", d, a[0], k_did8[i]);
     }
     uint32_t n = ++g_dev[d].calls[i];
+    if (i == 29 /* BuildActionMap */ || i == 30 /* SetActionMap */) {
+        const uint32_t *f = (const uint32_t *)(uintptr_t)a[1];   /* DIACTIONFORMATA */
+        /* dwSize, dwActionSize, dwDataSize, dwNumActions, rgoAction, guid[4], dwGenre,
+         * dwBufferSize, lAxisMin, lAxisMax, hInstString, ftTimeStamp[2], dwCRC, tszActionMap */
+        NFS_LOG(WIN32, "  DIACTIONFORMAT@%08X size %u actsize %u datasize %u n %u genre %08X buf %u hInstString %08X map \"%.40s\"",
+                a[1], f[0], f[1], f[2], f[3], f[9], f[10], f[13], (const char *)&f[17]);
+        const uint32_t *act = (const uint32_t *)(uintptr_t)f[4];   /* DIACTIONA: 0x34 bytes */
+        for (uint32_t k = 0; k < f[3] && k < 3 && i == 29; k++, act += f[1] / 4)
+            NFS_LOG(WIN32, "    action %u: appdata %08X semantic %08X flags %08X name/resid %08X how %08X",
+                    k, act[0], act[1], act[2], act[3], act[12]);
+    }
+    /* The controller object (0x874C40 in the tested build) keeps an active-low
+     * button mask at +8/+0xC, updated from the events right after
+     * GetDeviceData. Log it on the call after any frame that had events. */
+    static int s_pending;
+    if (i == 25 /* Poll */ && s_pending) {
+        s_pending = 0;
+        uint32_t ctl = a[2];
+        if (ctl >= 0x800000 && ctl < 0x932000)
+            NFS_LOG(WIN32, "dinput: controller %08X mask after events: %08X %08X", ctl,
+                    *(uint32_t *)(uintptr_t)(ctl + 8), *(uint32_t *)(uintptr_t)(ctl + 12));
+    }
+    if (i == 10 /* GetDeviceData */ && ret == 0 && a[3] && *(uint32_t *)(uintptr_t)a[3]) s_pending = 1;
+    if (i == 10 /* GetDeviceData */ && ret == 0 && a[3] && *(uint32_t *)(uintptr_t)a[3]) {
+        uint32_t cnt = *(uint32_t *)(uintptr_t)a[3];
+        const uint32_t *od = (const uint32_t *)(uintptr_t)a[2];   /* DIDEVICEOBJECTDATA: ofs data stamp seq appdata */
+        static uint32_t logged;
+        if (logged++ < 64)
+            NFS_LOG(WIN32, "dinput dev%d GetDeviceData -> %u events, first: ofs %08X data %08X appdata %08X",
+                    d, cnt, od[0], od[1], od[4]);
+    }
     if (ret & 0x80000000u) g_dev[d].fails[i]++;
     if (n <= 8 || ((ret & 0x80000000u) && g_dev[d].fails[i] <= 64))
         NFS_LOG(WIN32, "dinput dev%d %s(%08X %08X %08X) -> %08X%s", d, k_did8[i], a[1], a[2], a[3],
