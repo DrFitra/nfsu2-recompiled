@@ -72,7 +72,29 @@ static DWORD WINAPI watchdog(void *p) {
     }
 }
 
+/* NFSU2_NATIVE=1: the oracle. The ORIGINAL x86 code runs natively in this
+ * host (same image mapping, same import shims, windowed mode through the
+ * vtable hooks), so its behaviour can be compared with the recompiled code
+ * without the fullscreen original. Lifted code is not used at all. */
+static int g_native;
+
+static void make_guest_code_executable(void) {
+    IMAGE_NT_HEADERS32 *nt = (IMAGE_NT_HEADERS32 *)(uintptr_t)(NFS_GUEST_BASE +
+        ((IMAGE_DOS_HEADER *)(uintptr_t)NFS_GUEST_BASE)->e_lfanew);
+    IMAGE_SECTION_HEADER *sh = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, sh++) {
+        DWORD old;
+        if (sh->Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            VirtualProtect((void *)(uintptr_t)(NFS_GUEST_BASE + sh->VirtualAddress), sh->Misc.VirtualSize,
+                           PAGE_EXECUTE_READWRITE, &old);
+    }
+}
+
 static DWORD WINAPI game_thread(void *p) {
+    if (g_native) {
+        ((void (*)(void))p)();           /* WinMainCRTStartup; ends in ExitProcess */
+        return 0;
+    }
     native32_call_guest((uint32_t)(uintptr_t)p, 0, NULL);
     return g_eax;
 }
@@ -189,6 +211,11 @@ int main(int argc, char **argv) {
     IMAGE_NT_HEADERS32 *nt = (IMAGE_NT_HEADERS32 *)(uintptr_t)(NFS_GUEST_BASE +
         ((IMAGE_DOS_HEADER *)(uintptr_t)NFS_GUEST_BASE)->e_lfanew);
     uint32_t entry = NFS_GUEST_BASE + nt->OptionalHeader.AddressOfEntryPoint;
+    g_native = getenv("NFSU2_NATIVE") && *getenv("NFSU2_NATIVE") == '1';
+    if (g_native) {
+        make_guest_code_executable();
+        NFS_LOG(BOOT, "NFSU2_NATIVE=1: running the ORIGINAL x86 code natively (oracle mode)");
+    }
     NFS_LOG(BOOT, "entering original entry point 0x%08X", entry);
     nfs_log_flush();
     /* The game runs on its own host thread: every guest call is a host C call,
@@ -196,8 +223,10 @@ int main(int argc, char **argv) {
      * main-thread stack would be placed by the loader right where the guest
      * image has to go. */
     CreateThread(NULL, 0, watchdog, NULL, 0, NULL);
+    extern void nfs_profiler_start(HANDLE);
     HANDLE th = CreateThread(NULL, GAME_THREAD_STACK, game_thread, (void *)(uintptr_t)entry,
                              STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    nfs_profiler_start(th);
     WaitForSingleObject(th, INFINITE);
     DWORD rc = 0;
     GetExitCodeThread(th, &rc);

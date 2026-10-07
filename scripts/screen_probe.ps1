@@ -1,7 +1,8 @@
 # Screenshot probe: start an exe, optionally press keys at given seconds, and
 # save a small grayscale-average signature of the screen every second.
 #   powershell -File scripts/screen_probe.ps1 -Exe X -Out dir -Seconds 40 -KeyAt 14,17,20 [-Key 0x0D]
-param([string]$Exe, [string]$Out, [int]$Seconds = 40, [int[]]$KeyAt = @(), [int]$Key = 0x0D, [string]$WorkDir = "")
+param([string]$Exe, [string]$Out, [int]$Seconds = 40, [string]$KeyAt = "", [int]$Key = 0x0D, [string]$WorkDir = "")
+$KeyAt = @($KeyAt -split "[, ]+" | Where-Object { $_ } | ForEach-Object { [int]$_ })
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -25,8 +26,8 @@ for ($t = 0; $t -lt $Seconds; $t++) {
   if ($KeyAt -contains $t) { [K2]::Tap([byte]$Key) }
   $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
   $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-  $small = New-Object System.Drawing.Bitmap $bmp, 32, 18
-  $sum = 0; for ($y = 0; $y -lt 18; $y++) { for ($x = 0; $x -lt 32; $x++) { $c = $small.GetPixel($x, $y); $sum += $c.R + $c.G + $c.B } }
+  $small = New-Object System.Drawing.Bitmap $bmp, 320, 180
+  $sum = 0; for ($y = 0; $y -lt 180; $y += 10) { for ($x = 0; $x -lt 320; $x += 10) { $c = $small.GetPixel($x, $y); $sum += $c.R + $c.G + $c.B } }
   $small.Save((Join-Path $Out ("t{0:D2}.png" -f $t)))
   $sig += ("t={0,2} key={1} mean={2,4}" -f $t, ($KeyAt -contains $t), [int]($sum / (32*18*3)))
   $g.Dispose(); $bmp.Dispose(); $small.Dispose()

@@ -186,6 +186,7 @@ static void shim_DirectInput8Create(void) {
     HRESULT hr = real(h, ARG(1), (const void *)(uintptr_t)ARG(2), (void **)(uintptr_t)ARG(3),
                       (void *)(uintptr_t)ARG(4));
     if (hr == 0 && ARG(3)) { extern void nfs_dinput_register(uint32_t); nfs_dinput_register(*(uint32_t *)(uintptr_t)ARG(3)); }
+    if (hr == 0 && ARG(3)) { extern void nfs_dinput_hook(uint32_t); nfs_dinput_hook(*(uint32_t *)(uintptr_t)ARG(3)); }
     NFS_LOG(WIN32, "DirectInput8Create(hinst %08X -> %p, ver %X) -> %08lX, obj %08X", ARG(0), h, ARG(1),
             (unsigned long)hr, ARG(3) ? *(uint32_t *)(uintptr_t)ARG(3) : 0);
     RET((uint32_t)hr, 5);
@@ -213,6 +214,36 @@ static void shim_SetWindowLongA(void) {
     RET((uint32_t)SetWindowLongA(h, idx, v), 3);
 }
 
+
+/* ---- file opens, timestamped (FILE log) ---- */
+/* HANDLE CreateFileA(name, access, share, sa, disposition, flags, template) */
+static void shim_CreateFileA(void) {
+    static DWORD t0; if (!t0) t0 = GetTickCount();
+    const char *name = (const char *)(uintptr_t)ARG(0);
+    HANDLE h = CreateFileA(name, ARG(1), ARG(2), (LPSECURITY_ATTRIBUTES)(uintptr_t)ARG(3), ARG(4), ARG(5),
+                           (HANDLE)(uintptr_t)ARG(6));
+    DWORD err = GetLastError();
+    NFS_LOG(FILE, "+%6lu ms CreateFileA(\"%s\", %08X) -> %p%s", GetTickCount() - t0, name ? name : "(null)",
+            ARG(1), h, h == INVALID_HANDLE_VALUE ? " (failed)" : "");
+    SetLastError(err);
+    RET((uint32_t)(uintptr_t)h, 7);
+}
+
+
+/* IDirect3D9 *Direct3DCreate9(UINT sdk) -- real call, then the vtable hooks
+ * (windowed mode) are installed on the returned object. A shim rather than a
+ * bridge post-hook so it also runs when the guest executes natively. */
+static void shim_Direct3DCreate9(void) {
+    typedef void *(WINAPI *create9_t)(UINT);
+    static create9_t real;
+    extern void nfs_d3d9_hook_object(uint32_t);
+    if (!real) real = (create9_t)GetProcAddress(LoadLibraryA("d3d9.dll"), "Direct3DCreate9");
+    void *d3d = real(ARG(0));
+    NFS_LOG(D3D9, "Direct3DCreate9(%u) -> %p", ARG(0), d3d);
+    if (d3d) nfs_d3d9_hook_object((uint32_t)(uintptr_t)d3d);
+    RET((uint32_t)(uintptr_t)d3d, 1);
+}
+
 native32_shim_t g_nfs_shims[] = {
     { "GetModuleHandleA", shim_GetModuleHandleA },
     { "GetModuleFileNameA", shim_GetModuleFileNameA },
@@ -223,5 +254,7 @@ native32_shim_t g_nfs_shims[] = {
     { "LockResource", shim_LockResource },
     { "DirectInput8Create", shim_DirectInput8Create },
     { "SetWindowLongA", shim_SetWindowLongA },
+    { "CreateFileA", shim_CreateFileA },
+    { "Direct3DCreate9", shim_Direct3DCreate9 },
 };
 int g_nfs_nshims = sizeof g_nfs_shims / sizeof g_nfs_shims[0];

@@ -64,7 +64,7 @@ enum { D_PRESENT = 17, D_CREATETEX = 23, D_CREATECUBE = 25, D_CREATEVB = 26, D_C
        D_SETFVF = 89, D_CREATEVS = 91, D_CREATEPS = 106, D_RESET = 16 };
 
 static int g_mode = 1;                 /* 0 off, 1 summary, 2 full */
-static uint32_t g_create9, g_d3d_vt[17], g_dev_vt[NDEV];
+static uint32_t g_d3d_vt[17], g_dev_vt[NDEV];
 static uint64_t g_count[NDEV], g_frame_count[NDEV];
 static uint32_t g_frames;
 /* sets of values seen: small open tables */
@@ -117,14 +117,27 @@ void nfs_d3d9_write_report(void) {
 
 int nfs_dinput_post(uint32_t fn, const uint32_t *a, uint32_t ret);
 
+/* Name any unnamed native target "module+0xOFF" once, so traces and crash
+ * reports say which DLL a COM/GetProcAddress call went to. */
+static void name_unknown(uint32_t fn) {
+    if (native32_name(fn)) return;
+    HMODULE m = NULL; char path[MAX_PATH] = "?", off[24];
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)(uintptr_t)fn, &m)) GetModuleFileNameA(m, path, MAX_PATH);
+    const char *b = strrchr(path, '\\'); b = b ? b + 1 : path;
+    snprintf(off, sizeof off, "+0x%X", (unsigned)(fn - (uint32_t)(uintptr_t)m));
+    native32_add_name(fn, b, off);
+}
+
 static void post(uint32_t fn, const uint32_t *a, uint32_t ret) {
+    name_unknown(fn);
     if (nfs_dinput_post(fn, a, ret)) return;
-    if (fn == g_create9 && ret) {
-        const uint32_t *vt = *(const uint32_t **)(uintptr_t)ret;
-        for (int i = 0; i < 17; i++) { g_d3d_vt[i] = vt[i]; native32_add_name(vt[i], "IDirect3D9", k_d3d9[i]); }
-        NFS_LOG(D3D9, "Direct3DCreate9(%u) -> IDirect3D9 %08X", a[0], ret);
-        return;
-    }
+    if (g_d3d_vt[0]) for (int k = 3; k < 17; k++)
+        if (fn == g_d3d_vt[k] && (ret & 0x80000000u) && k != 16) {
+            static uint32_t s_f3[17];
+            if (s_f3[k]++ < 16) NFS_LOG(D3D9, "FAILED IDirect3D9::%s(%08X %08X %08X %08X %08X) -> %08X",
+                                        k_d3d9[k], a[1], a[2], a[3], a[4], a[5], ret);
+        }
     if (g_d3d_vt[16] && fn == g_d3d_vt[16]) {               /* IDirect3D9::CreateDevice */
         const uint32_t *pp = (const uint32_t *)(uintptr_t)a[5];
         snprintf(g_pp, sizeof g_pp,
@@ -145,6 +158,10 @@ static void post(uint32_t fn, const uint32_t *a, uint32_t ret) {
     int i = dev_index(fn);
     if (i < 0) return;
     g_count[i]++; g_frame_count[i]++;
+    /* every failing HRESULT, the first 16 per method (AddRef/Release return counts) */
+    static uint32_t s_fail[NDEV];
+    if (i > 2 && (ret & 0x80000000u) && s_fail[i]++ < 16)
+        NFS_LOG(D3D9, "FAILED %s(%08X %08X %08X %08X %08X) -> %08X", k_dev[i], a[1], a[2], a[3], a[4], a[5], ret);
     switch (i) {
     case D_SETRS: vs_add(&s_rs, a[1]); break;
     case D_SETTSS: vs_add(&s_tss, a[2]); break;
@@ -162,6 +179,18 @@ static void post(uint32_t fn, const uint32_t *a, uint32_t ret) {
     case D_CREATEPS: s_ps_created++; break;
     case D_CREATEDECL: s_decl_created++; break;
     case D_RESET: NFS_LOG(D3D9, "Reset -> %08X", ret); break;
+    }
+    /* Shader constants that are NaN/Inf: a CPU-side math error shows up here
+     * first (a car lit by NaN renders black). First 32 occurrences. */
+    if (i == 94 /* SetVertexShaderConstantF */ || i == 109 /* SetPixelShaderConstantF */) {
+        static uint32_t s_bad;
+        const uint32_t *v = (const uint32_t *)(uintptr_t)a[2];
+        for (uint32_t k = 0; v && k < a[3] * 4 && s_bad < 32; k++)
+            if ((v[k] & 0x7F800000u) == 0x7F800000u) {
+                s_bad++;
+                NFS_LOG(D3D9, "%s: c%u.%c = %08X (NaN/Inf) frame %u", k_dev[i], a[1] + k / 4, "xyzw"[k % 4], v[k], g_frames);
+                break;
+            }
     }
     if (g_mode == 2) NFS_LOG(D3D9, "%s(%08X %08X %08X %08X) -> %08X", k_dev[i], a[1], a[2], a[3], a[4], ret);
     if (i == D_PRESENT) {
@@ -188,12 +217,29 @@ static void post(uint32_t fn, const uint32_t *a, uint32_t ret) {
  * back buffer, centred on the desktop. The game itself is not told. */
 int g_nfs_windowed = 1;
 
+/* NFSU2_BACKGROUND=1 (testing): keep the game running while its window is
+ * not active. The game pauses on WM_ACTIVATEAPP(FALSE); a host-side subclass
+ * of its window turns that into TRUE before the guest WndProc sees it. */
+static WNDPROC g_game_wndproc;
+static LRESULT CALLBACK bg_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_ACTIVATEAPP && !w) w = TRUE;
+    if (m == WM_ACTIVATE && LOWORD(w) == WA_INACTIVE) w = WA_ACTIVE;
+    return CallWindowProcA(g_game_wndproc, h, m, w, l);
+}
+static void maybe_background(HWND hwnd) {
+    const char *e = getenv("NFSU2_BACKGROUND");
+    if (!e || *e != '1' || g_game_wndproc || !hwnd) return;
+    g_game_wndproc = (WNDPROC)SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)bg_wndproc);
+    NFS_LOG(D3D9, "NFSU2_BACKGROUND: window %p keeps running when inactive (wndproc %p)", hwnd, g_game_wndproc);
+}
+
 static void make_windowed(uint32_t *pp, uint32_t hwnd_hint) {
     pp[8] = 1;            /* Windowed */
     pp[12] = 0;           /* FullScreen_RefreshRateInHz */
     pp[2] = 0;            /* BackBufferFormat: D3DFMT_UNKNOWN = desktop format */
     HWND hwnd = (HWND)(uintptr_t)(pp[7] ? pp[7] : hwnd_hint);
     if (!hwnd) return;
+    maybe_background(hwnd);
     RECT r = { 0, 0, (LONG)(pp[0] ? pp[0] : 640), (LONG)(pp[1] ? pp[1] : 480) };
     DWORD style = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     AdjustWindowRect(&r, style, FALSE);
@@ -206,12 +252,44 @@ static void make_windowed(uint32_t *pp, uint32_t hwnd_hint) {
     NFS_LOG(D3D9, "windowed: %ux%u client, window %dx%d at %d,%d", pp[0], pp[1], w, h, x, y);
 }
 
+/* ---- vtable hooks (work for lifted AND native guest code) ----
+ * The windowed-mode rewrite has to happen whoever calls CreateDevice/Reset:
+ * lifted code goes through the native32 bridge, but original x86 code run
+ * natively (NFSU2_NATIVE=1, the oracle) calls d3d9.dll directly. Patching the
+ * slots of the (process-local) vtables catches both. */
+typedef HRESULT (__stdcall *create_device_t)(void *, UINT, UINT, HWND, DWORD, void *, void **);
+typedef HRESULT (__stdcall *reset_t)(void *, void *);
+static create_device_t g_orig_create;
+static reset_t g_orig_reset;
+static void patch_slot(uint32_t *slot, void *fn, void **orig) {
+    DWORD old;
+    if (*slot == (uint32_t)(uintptr_t)fn) return;
+    VirtualProtect(slot, 4, PAGE_EXECUTE_READWRITE, &old);
+    *orig = (void *)(uintptr_t)*slot;
+    *slot = (uint32_t)(uintptr_t)fn;
+    VirtualProtect(slot, 4, old, &old);
+}
+static HRESULT __stdcall hk_reset(void *dev, void *pp) {
+    if (g_nfs_windowed && pp) make_windowed((uint32_t *)pp, 0);
+    return g_orig_reset(dev, pp);
+}
+static HRESULT __stdcall hk_create(void *d3d, UINT ad, UINT type, HWND focus, DWORD flags, void *pp, void **out) {
+    if (g_nfs_windowed && pp) make_windowed((uint32_t *)pp, (uint32_t)(uintptr_t)focus);
+    HRESULT hr = g_orig_create(d3d, ad, type, focus, flags, pp, out);
+    if (hr == 0 && out && *out)
+        patch_slot(&(*(uint32_t **)*out)[D_RESET], (void *)hk_reset, (void **)&g_orig_reset);
+    return hr;
+}
+/* Called by the Direct3DCreate9 shim with the new IDirect3D9. */
+void nfs_d3d9_hook_object(uint32_t d3d9) {
+    uint32_t *vt = *(uint32_t **)(uintptr_t)d3d9;
+    patch_slot(&vt[16], (void *)hk_create, (void **)&g_orig_create);
+    for (int i = 0; i < 17; i++) { g_d3d_vt[i] = vt[i]; native32_add_name(vt[i], "IDirect3D9", k_d3d9[i]); }
+    NFS_LOG(D3D9, "IDirect3D9 %08X: CreateDevice hooked (windowed=%d)", d3d9, g_nfs_windowed);
+}
+
 static void pre(uint32_t fn, uint32_t *a) {
-    if (!g_nfs_windowed) return;
-    if (g_d3d_vt[16] && fn == g_d3d_vt[16])                          /* CreateDevice */
-        make_windowed((uint32_t *)(uintptr_t)a[5], a[3]);
-    else if (g_dev_vt[D_RESET] && fn == g_dev_vt[D_RESET])            /* Reset */
-        make_windowed((uint32_t *)(uintptr_t)a[1], 0);
+    (void)fn; (void)a;   /* nothing yet: windowed mode lives in the vtable hooks */
 }
 
 void nfs_d3d9_trace_init(void) {
@@ -219,9 +297,6 @@ void nfs_d3d9_trace_init(void) {
     if (m) g_mode = !strcmp(m, "full") ? 2 : (!strcmp(m, "0") || !strcmp(m, "off")) ? 0 : 1;
     native32_post_hook = post;
     native32_pre_hook = pre;
-    /* The vtables have to be named for windowed mode even with tracing off. */
-    HMODULE d3d9 = LoadLibraryA("d3d9.dll");
-    g_create9 = (uint32_t)(uintptr_t)GetProcAddress(d3d9, "Direct3DCreate9");
     NFS_LOG(D3D9, "display: %s", g_nfs_windowed ? "windowed (use --fullscreen for fullscreen)" : "fullscreen");
     if (!g_mode) return;
     native32_post_hook = post;
