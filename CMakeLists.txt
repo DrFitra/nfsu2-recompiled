@@ -18,8 +18,8 @@ if(NOT GEN_SOURCES)
 endif()
 
 set(RT "${PCRECOMP}/runtime")
-set(COMMON_DEFS RECOMP_FLAT_MEMORY RECOMP_STRICT_ICALL _CRT_SECURE_NO_WARNINGS)
-set(COMMON_INC "${RT}/recomp32" "${RT}/native32" "${CMAKE_SOURCE_DIR}/src/runtime"
+set(COMMON_DEFS RECOMP_FLAT_MEMORY RECOMP_STRICT_ICALL RECOMP_NATIVE_RANGE _CRT_SECURE_NO_WARNINGS)
+set(COMMON_INC "${RT}/recomp32" "${RT}/native32" "${RT}/hybrid" "${CMAKE_SOURCE_DIR}/src/runtime"
                "${CMAKE_SOURCE_DIR}/src/platform" "${GEN_DIR}")
 
 # ---- generated code ----
@@ -45,6 +45,8 @@ add_executable(NFSU2-Recompiled
   src/runtime/overrides.c
   src/runtime/d3d9_trace.c
   src/runtime/dinput_trace.c
+  src/runtime/native_range.c
+  ${RT}/hybrid/hybrid.c
   src/shims/win32_shims.c
   src/platform/nfs_log.c
   ${RT}/native32/native32.c

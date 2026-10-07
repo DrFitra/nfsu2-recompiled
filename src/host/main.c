@@ -212,6 +212,7 @@ int main(int argc, char **argv) {
         ((IMAGE_DOS_HEADER *)(uintptr_t)NFS_GUEST_BASE)->e_lfanew);
     uint32_t entry = NFS_GUEST_BASE + nt->OptionalHeader.AddressOfEntryPoint;
     g_native = getenv("NFSU2_NATIVE") && *getenv("NFSU2_NATIVE") == '1';
+    { extern void nfs_native_range_init(void); nfs_native_range_init(); }
     if (g_native) {
         make_guest_code_executable();
         NFS_LOG(BOOT, "NFSU2_NATIVE=1: running the ORIGINAL x86 code natively (oracle mode)");
