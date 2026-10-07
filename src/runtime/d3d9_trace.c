@@ -141,7 +141,7 @@ static void post(uint32_t fn, const uint32_t *a, uint32_t ret) {
         }
         return;
     }
-    if (!g_dev_vt[0]) return;
+    if (!g_dev_vt[0] || !g_mode) return;
     int i = dev_index(fn);
     if (i < 0) return;
     g_count[i]++; g_frame_count[i]++;
@@ -178,13 +178,52 @@ static void post(uint32_t fn, const uint32_t *a, uint32_t ret) {
     }
 }
 
+/* ---- windowed mode ----
+ *
+ * NFSU2 only creates fullscreen devices. With g_nfs_windowed set, the
+ * presentation parameters of IDirect3D9::CreateDevice and
+ * IDirect3DDevice9::Reset are rewritten before the real call (Windowed = 1,
+ * no fullscreen refresh rate, back-buffer format from the desktop), and the
+ * game's borderless window becomes a normal window whose client area is the
+ * back buffer, centred on the desktop. The game itself is not told. */
+int g_nfs_windowed = 1;
+
+static void make_windowed(uint32_t *pp, uint32_t hwnd_hint) {
+    pp[8] = 1;            /* Windowed */
+    pp[12] = 0;           /* FullScreen_RefreshRateInHz */
+    pp[2] = 0;            /* BackBufferFormat: D3DFMT_UNKNOWN = desktop format */
+    HWND hwnd = (HWND)(uintptr_t)(pp[7] ? pp[7] : hwnd_hint);
+    if (!hwnd) return;
+    RECT r = { 0, 0, (LONG)(pp[0] ? pp[0] : 640), (LONG)(pp[1] ? pp[1] : 480) };
+    DWORD style = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    AdjustWindowRect(&r, style, FALSE);
+    int w = r.right - r.left, h = r.bottom - r.top;
+    int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2, y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
+    SetWindowLongA(hwnd, GWL_STYLE, style | WS_VISIBLE);
+    SetWindowLongA(hwnd, GWL_EXSTYLE, 0);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, x < 0 ? 0 : x, y < 0 ? 0 : y, w, h,
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
+    NFS_LOG(D3D9, "windowed: %ux%u client, window %dx%d at %d,%d", pp[0], pp[1], w, h, x, y);
+}
+
+static void pre(uint32_t fn, uint32_t *a) {
+    if (!g_nfs_windowed) return;
+    if (g_d3d_vt[16] && fn == g_d3d_vt[16])                          /* CreateDevice */
+        make_windowed((uint32_t *)(uintptr_t)a[5], a[3]);
+    else if (g_dev_vt[D_RESET] && fn == g_dev_vt[D_RESET])            /* Reset */
+        make_windowed((uint32_t *)(uintptr_t)a[1], 0);
+}
+
 void nfs_d3d9_trace_init(void) {
     const char *m = getenv("D3D_TRACE");
     if (m) g_mode = !strcmp(m, "full") ? 2 : (!strcmp(m, "0") || !strcmp(m, "off")) ? 0 : 1;
     native32_post_hook = post;
-    if (!g_mode) return;
+    native32_pre_hook = pre;
+    /* The vtables have to be named for windowed mode even with tracing off. */
     HMODULE d3d9 = LoadLibraryA("d3d9.dll");
     g_create9 = (uint32_t)(uintptr_t)GetProcAddress(d3d9, "Direct3DCreate9");
+    NFS_LOG(D3D9, "display: %s", g_nfs_windowed ? "windowed (use --fullscreen for fullscreen)" : "fullscreen");
+    if (!g_mode) return;
     native32_post_hook = post;
     NFS_LOG(D3D9, "D3D9 trace: %s", g_mode == 2 ? "full" : "summary");
 }

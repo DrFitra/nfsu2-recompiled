@@ -191,6 +191,28 @@ static void shim_DirectInput8Create(void) {
     RET((uint32_t)hr, 5);
 }
 
+
+/* ---- windowed mode: keep a framed window ----
+ * NFSU2 restyles its window for fullscreen (WS_POPUP, topmost) after the
+ * device exists. In windowed mode the style is kept framed and movable, and
+ * the extended style loses WS_EX_TOPMOST. Only windows of class "GameFrame". */
+extern int g_nfs_windowed;
+static int is_game_window(HWND h) {
+    char c[32] = "";
+    return h && GetClassNameA(h, c, sizeof c) && !strcmp(c, "GameFrame");
+}
+/* LONG SetWindowLongA(HWND, int index, LONG value) */
+static void shim_SetWindowLongA(void) {
+    HWND h = (HWND)(uintptr_t)ARG(0);
+    int idx = (int)ARG(1);
+    LONG v = (LONG)ARG(2);
+    if (g_nfs_windowed && is_game_window(h)) {
+        if (idx == GWL_STYLE) v = (LONG)((WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)) | (v & WS_VISIBLE));
+        else if (idx == GWL_EXSTYLE) v &= ~WS_EX_TOPMOST;
+    }
+    RET((uint32_t)SetWindowLongA(h, idx, v), 3);
+}
+
 native32_shim_t g_nfs_shims[] = {
     { "GetModuleHandleA", shim_GetModuleHandleA },
     { "GetModuleFileNameA", shim_GetModuleFileNameA },
@@ -200,5 +222,6 @@ native32_shim_t g_nfs_shims[] = {
     { "SizeofResource", shim_SizeofResource },
     { "LockResource", shim_LockResource },
     { "DirectInput8Create", shim_DirectInput8Create },
+    { "SetWindowLongA", shim_SetWindowLongA },
 };
 int g_nfs_nshims = sizeof g_nfs_shims / sizeof g_nfs_shims[0];
