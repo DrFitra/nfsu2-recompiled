@@ -1,8 +1,20 @@
+From 9a242d9fe5fecaec81e826b5b54029d78c544518 Mon Sep 17 00:00:00 2001
+From: sistemas3cecasem <paukarvv@gmail.com>
+Date: Wed, 7 Oct 2026 15:22:02 -0400
+Subject: [PATCH 10/11] recomp_types: RECOMP_NATIVE_RANGE, run a VA range of
+ lifted functions as the original code
+
+Bisection aid for a hybrid host: RECOMP_ENTER diverts functions in
+[g_native_lo, g_native_hi) to the host's recomp_run_native.
+---
+ runtime/recomp32/recomp_types.h | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
 diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
-index 6fff83d..9c69274 100644
+index f1d9410..97746b2 100644
 --- a/runtime/recomp32/recomp_types.h
 +++ b/runtime/recomp32/recomp_types.h
-@@ -1050,12 +1050,27 @@ void recomp_unresolved(const char *kind, uint32_t va, uint32_t from);
+@@ -1054,12 +1054,27 @@ void recomp_unresolved(const char *kind, uint32_t va, uint32_t from);
   * useful for pinning a crash to a function without perturbing codegen. */
  extern uint32_t g_cur_func;
  
@@ -31,3 +43,6 @@ index 6fff83d..9c69274 100644
  #else
  #define RECOMP_ENTER(va) (g_cur_func = (va), RECOMP_FLAGS_IN())
  #endif
+-- 
+2.52.0.windows.1
+
