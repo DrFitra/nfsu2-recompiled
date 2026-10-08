@@ -4,6 +4,7 @@ struct ANativeWindow;
 void configureD3D9Bridge(void* guestBase,uint32_t (*allocator)(uint32_t),void (*deallocator)(uint32_t));
 void shutdownD3D9Bridge();
 void setD3D9HostWindow(ANativeWindow* window);
+void setD3D9RenderSize(unsigned width,unsigned height);
 bool d3d9RequestsSurface();
 void acknowledgeD3D9Surface(bool available);
 uint32_t createGuestD3D9(uint32_t sdk);

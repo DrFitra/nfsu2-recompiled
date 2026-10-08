@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <ctime>
 #include <thread>
 #include <atomic>
 #include <unistd.h>
@@ -50,6 +51,7 @@ uint32_t g_icall_trace_idx, g_icall_count;
 
 namespace {
 std::atomic<uint32_t> displayWidth{1280},displayHeight{720};
+std::atomic<uint32_t> renderWidth{0},renderHeight{0};
 std::string hex(uint32_t va) {
     std::ostringstream out; out << "0x" << std::hex << std::setw(8) << std::setfill('0') << va;
     return out.str();
@@ -95,8 +97,13 @@ thread_local uint32_t lastImport{};
 std::string hostGameRoot;
 std::string guestLanguage="Spanish";
 std::atomic<bool> stopRequested{false};
+std::atomic<bool> guestPaused{false};
 std::chrono::steady_clock::time_point bootDeadline;
 std::string guestThreadFault;
+bool timerTestActive=false;std::vector<uint32_t> timerTestCalls;
+constexpr uint32_t timerTestAddress=0x7b000010u;
+bool generatedTestActive=false;unsigned generatedTestCalls=0;
+constexpr uint32_t generatedTestTarget=0x7b000020u;
 void yieldGuestMachine(unsigned milliseconds=0) {
     if(!machineLease||!machineLease->owns_lock())throw GuestStop("Guest scheduler ownership missing");
     State saved;saved.save();machineLease->unlock();
@@ -104,9 +111,18 @@ void yieldGuestMachine(unsigned milliseconds=0) {
     machineLease->lock();saved.load();
 }
 void checkGuestProgress() {
+    while(guestPaused.load()&&!stopRequested.load())yieldGuestMachine(20);
     if(stopRequested.load())throw GuestStop("Guest execution cancelled");
-    if(std::chrono::steady_clock::now()>bootDeadline)throw GuestStop("CRT bring-up time budget reached at "+hex(g_cur_func));
-    yieldGuestMachine();
+    // Imports and lifted back edges can reach this hook many times per frame.
+    // Keep cancellation immediate, but amortize full register saves and native
+    // scheduler handovers over a short time slice rather than every call.
+    thread_local unsigned checkpoints=0;
+    thread_local auto nextYield=std::chrono::steady_clock::time_point::min();
+    if((++checkpoints&63u)==0){
+        auto now=std::chrono::steady_clock::now();
+        if(now>bootDeadline)throw GuestStop("CRT bring-up time budget reached at "+hex(g_cur_func));
+        if(now>=nextYield){yieldGuestMachine();nextYield=std::chrono::steady_clock::now()+std::chrono::microseconds(500);}
+    }
     if(!guestThreadFault.empty())throw GuestStop(guestThreadFault);
 }
 constexpr uint32_t importBase = 0x7f000000u;
@@ -172,7 +188,16 @@ void getProcAddress();
 thread_local uint32_t d3dToken{};
 void direct3DCreate(){ret(createGuestD3D9(arg(0)),1);}
 void freeD3DGuest(uint32_t address){heaps->free(GuestHeaps::process,address);}
-void d3dDispatch(){uint32_t args[32];for(unsigned i=0;i<32;++i)args[i]=arg(i);uint32_t count=0;uint32_t result=dispatchGuestD3D9(d3dToken,args,&count);ret(result,count);}
+void d3dDispatch(){uint32_t args[32];for(unsigned i=0;i<32;++i)args[i]=arg(i);uint32_t count=0;uint32_t token=d3dToken;
+    static uint64_t bridgeCalls=0;static std::chrono::nanoseconds bridgeTime{};
+    auto bridgeStart=std::chrono::steady_clock::now();uint32_t result=dispatchGuestD3D9(token,args,&count);
+    bridgeTime+=std::chrono::steady_clock::now()-bridgeStart;++bridgeCalls;
+    if(token==0x7e002110u&&result==0){static unsigned frames=0;static auto since=std::chrono::steady_clock::now();
+        if(++frames==120){auto now=std::chrono::steady_clock::now();double seconds=std::chrono::duration<double>(now-since).count();
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest D3D9 presentation %.1f FPS over %.2f seconds; bridge %.2f ms/frame, %.0f calls/frame",
+                frames/seconds,seconds,double(bridgeTime.count())/1e6/frames,double(bridgeCalls)/frames);
+            frames=0;since=now;bridgeTime=std::chrono::nanoseconds{};bridgeCalls=0;}
+    }ret(result,count);}
 #endif
 uint32_t callGuest(uint32_t va,const std::vector<uint32_t>& args,uint32_t cleanup=0);
 #include "guest_threads.inc"
@@ -189,13 +214,13 @@ void testGuestScheduling(){
         std::unique_lock<std::recursive_mutex> lease(machine);machineLease=&lease;guestThreadId=9000;
         State fresh;fresh.eax=0xaabbccdd;fresh.fs=0xdead1000;fresh.st[0]=-456.25;fresh.xmm[7].u64[0]=0xfedcba9876543210ull;fresh.load();
         lastError=222;tlsValues[1087]=0xaa;
-        try{for(unsigned i=0;i<100;++i){checkGuestProgress();
+        try{for(unsigned i=0;i<100;++i){checkGuestProgress();yieldGuestMachine();
             if(g_eax!=0xaabbccdd||g_fs_base!=0xdead1000||g_st[0]!=-456.25||g_xmm[7].u64[0]!=0xfedcba9876543210ull||lastError!=222||tlsValues[1087]!=0xaa)
                 throw GuestStop("Guest worker context was not isolated");}}
         catch(const std::exception& error){failure=error.what();}
         done=true;machineLease=nullptr;
     });
-    try{while(!done){checkGuestProgress();
+    try{while(!done){checkGuestProgress();yieldGuestMachine();
         if(g_eax!=0x11223344||g_fs_base!=0x21000000||g_st[0]!=123.5||g_xmm[7].u64[0]!=0x123456789abcdef0ull||lastError!=111||tlsValues[1087]!=0x55)
             failure="Main guest context was not preserved during handover";
     }}catch(const std::exception& error){failure=error.what();}
@@ -204,6 +229,7 @@ void testGuestScheduling(){
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest scheduler passed 100 handovers with separate integer, FS, x87, XMM, TLS and last-error state");
 }
 recomp_func_t resolveFunction(const std::string& dll, const std::string& name) {
+    if((dll=="shfolder.dll"||dll=="shell32.dll")&&name=="SHGetFolderPathA")return shellFolderPath;
     if(dll=="dsound.dll"&&(name=="#1"||name=="DirectSoundCreate"))return directSoundCreate;
     if(dll=="dinput8.dll"&&name=="DirectInput8Create")return directInputCreate;
     if(dll=="gdi32.dll"&&name=="DeleteObject")return deleteGdiObject;
@@ -319,7 +345,7 @@ void loadImage(const char* path) {
 uint32_t callGuest(uint32_t va, const std::vector<uint32_t>& args, uint32_t cleanup) {
     State saved; saved.save();
     try {
-        recomp_func_t fn=recomp_lookup(va);
+        recomp_func_t fn=recomp_lookup_manual(va);if(!fn)fn=recomp_lookup(va);
         if (!fn) fn=recomp_lookup_import(va);
         if (!fn) throw GuestStop("No guest function at " + hex(va));
         for (auto it=args.rbegin();it!=args.rend();++it) { g_esp-=4; write32(g_esp,*it); }
@@ -344,6 +370,143 @@ void testLiftedCopy() {
     }
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Real lifted sub_00401000 passed 7 copy/cdecl stack cases on a 64-bit host");
 }
+void timerTestCallback(){timerTestCalls.push_back(arg(0));ret(0,5);}
+void testGuestTimers(){
+    auto imported=[&](const std::string& name){for(uint32_t i=0;i<imports.size();++i)if(imports[i].name==name)return importBase+i*16;throw GuestStop("Timer test import unavailable");};
+    uint32_t set=imported("winmm.dll!timeSetEvent"),kill=imported("winmm.dll!timeKillEvent");
+    auto wait=[&](unsigned count){auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(timerTestCalls.size()<count){if(std::chrono::steady_clock::now()>until)throw GuestStop("Timer callback deadline failed");checkGuestProgress();yieldGuestMachine(1);}};
+    timerTestActive=true;timerTestCalls.clear();
+    try{
+        auto first=callGuest(set,{2,0,timerTestAddress,0,0x100});if(!first)throw GuestStop("Timer creation failed");wait(1);
+        if(timerTestCalls[0]!=first||timerHandles.count(first))throw GuestStop("One-shot timer retirement failed");
+        auto worker=timerWorker->id;
+        auto periodic=callGuest(set,{2,0,timerTestAddress,0,0x101});wait(3);
+        if(callGuest(kill,{periodic})||timerHandles.count(periodic))throw GuestStop("Periodic timer cancellation failed");
+        size_t after=timerTestCalls.size();auto cancelled=callGuest(set,{20,0,timerTestAddress,0,0x100});
+        if(callGuest(kill,{cancelled}))throw GuestStop("Pending timer cancellation failed");
+        auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(25);while(std::chrono::steady_clock::now()<until){checkGuestProgress();yieldGuestMachine(1);}
+        if(timerTestCalls.size()!=after||!timerHandles.empty()||timerWorker->id!=worker||guestThreads.size()!=1)throw GuestStop("Timer cancellation/worker reuse failed");
+        timerTestActive=false;
+        NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Timer worker passed: one-shot, periodic, synchronous cancel, pending cancel, retirement and single-thread reuse");
+    }catch(...){timerTestActive=false;for(auto& timer:timerHandles)timer.second->cancelled=true;timerHandles.clear();throw;}
+}
+void testGuestFileTime(){
+    auto imported=[&](const std::string& name){for(uint32_t i=0;i<imports.size();++i)if(imports[i].name==name)return importBase+i*16;throw GuestStop("File-time import unavailable");};
+    uint32_t local=imported("kernel32.dll!FileTimeToLocalFileTime"),system=imported("kernel32.dll!FileTimeToSystemTime");
+    uint32_t data=allocate(48);uint64_t epoch=116444736000000000ull+1234ull*10000ull;
+    std::memset(ptr(data,48),0xa5,48);std::memcpy(ptr(data,8),&epoch,8);
+    bool okay=callGuest(local,{data,data+8})==1&&read32(data+8)==uint32_t(epoch)&&read32(data+12)==uint32_t(epoch>>32)
+        &&callGuest(system,{data+8,data+16})==1;
+    const uint16_t expected[]={1970,1,4,1,0,0,1,234};
+    okay=okay&&!std::memcmp(ptr(data+16,16),expected,16)&&read32(data+32)==0xa5a5a5a5u;
+    okay=okay&&callGuest(local,{data,data})==0;
+    uint64_t invalid=0x8000000000000000ull;std::memcpy(ptr(data,8),&invalid,8);
+    okay=okay&&callGuest(system,{data,data+16})==0;
+    heaps->free(GuestHeaps::process,data);
+    if(!okay)throw GuestStop("Guest file-time conversion self-check failed");
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest UTC FILETIME conversions passed: epoch, milliseconds, guards and invalid input");
+}
+void testGuestCriticalSections(){
+    auto imported=[&](const std::string& name){for(uint32_t i=0;i<imports.size();++i)if(imports[i].name=="kernel32.dll!"+name)return importBase+i*16;throw GuestStop("Critical-section import unavailable");};
+    uint32_t initialize=imported("InitializeCriticalSection"),enter=imported("EnterCriticalSection"),leave=imported("LeaveCriticalSection"),remove=imported("DeleteCriticalSection");
+    uint32_t data=allocate(32);std::memset(ptr(data,32),0xa5,32);
+    callGuest(initialize,{data});callGuest(enter,{data});callGuest(enter,{data});
+    bool okay=read32(data+8)==2&&read32(data+12)==guestThreadId&&read32(data+24)==0xa5a5a5a5u;
+    callGuest(remove,{data});okay=okay&&criticalSections.count(data)&&pendingCriticalDeletes.count(data);
+    callGuest(leave,{data});okay=okay&&read32(data+8)==1&&criticalSections.count(data);
+    callGuest(leave,{data});okay=okay&&!criticalSections.count(data)&&!pendingCriticalDeletes.count(data)&&read32(data+8)==0;
+    callGuest(initialize,{data});callGuest(remove,{data});okay=okay&&!criticalSections.count(data);
+    heaps->free(GuestHeaps::process,data);
+    if(!okay)throw GuestStop("Guest critical-section retirement self-check failed");
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest critical sections passed recursion, owner, guards, deferred retirement and reinitialization");
+}
+thread_local uint32_t dynamicThunkAddress{};
+void generatedTestCallback(){++generatedTestCalls;ret(read32(arg(0)),0);}
+void dynamicThunk(){
+    uint32_t start=dynamicThunkAddress,pc=start;
+    if(!memory->readable(start,5)||read32(start)!=0x24748b56u||*static_cast<uint8_t*>(ptr(start+4,1))!=8)
+        throw GuestStop("Invalid generated callback at "+hex(start));
+    uint32_t originalEsi=g_esi,esi=0,eax=g_eax,ecx=g_ecx,originalEsp=g_esp;
+    unsigned saved=0,arguments=0,totalArguments=0;bool pending=false,stackCleared=false,popped=false,compared=false;int comparison=0;
+    auto byte=[&](){return *static_cast<const uint8_t*>(ptr(pc++,1));};
+    auto word=[&](){uint32_t value=read32(pc);pc+=4;return value;};
+    for(unsigned steps=0;steps<4096&&pc-start<65536;++steps){
+        uint32_t instruction=pc;uint8_t op=byte();
+        if(op==0x56){if(!saved){saved=1;}else{++arguments;++totalArguments;pending=true;stackCleared=false;}continue;}
+        if(op==0xe8&&pending){int32_t delta=static_cast<int32_t>(word());uint32_t target=pc+delta;
+            if(!recomp_lookup(target)&&!(generatedTestActive&&target==generatedTestTarget))throw GuestStop("Generated callback calls unlifted "+hex(target));
+            eax=callGuest(target,{esi},4);pending=false;continue;}
+        if(op==0x83){uint8_t form=byte(),delta=byte();
+            if(form==0xc6){esi+=int8_t(delta);compared=false;continue;}
+            if(form==0xc4&&uint32_t(int32_t(int8_t(delta)))==arguments*4&&!pending){stackCleared=true;arguments=0;compared=false;continue;}
+        }
+        if(op==0x81){uint8_t form=byte();uint32_t delta=word();
+            if(form==0xc6){esi+=delta;compared=false;continue;}
+            if(form==0xc4&&delta==arguments*4&&!pending){stackCleared=true;arguments=0;compared=false;continue;}
+        }
+        if(op==0x89){uint8_t form=byte();uint32_t offset;
+            if(form==0x86)offset=word();else if(form==0x46)offset=byte();else throw GuestStop("Generated callback store form pending");
+            write32(esi+offset,eax);continue;}
+        if(op==0x8b){uint8_t form=byte();
+            if(form==0x74||form==0xb4){uint8_t sib=byte();uint32_t offset=form==0x74?uint32_t(int32_t(int8_t(byte()))):word();
+                if(sib==0x24&&saved&&offset==4*(saved+arguments)+4){esi=read32(originalEsp+4);continue;}}
+            if(form==0x46){eax=read32(esi+byte());continue;}
+            if(form==0x06){eax=read32(esi);continue;}
+            if(form==0x4e){ecx=read32(esi+uint32_t(int32_t(int8_t(byte()))));continue;}
+            if(form==0x8e){ecx=read32(esi+word());continue;}
+            if(form==0x0e){ecx=read32(esi);continue;}
+            if(form==0xc1){eax=ecx;continue;}
+        }
+        if(op==0x3b&&byte()==0xc1){comparison=int32_t(eax)<int32_t(ecx)?-1:int32_t(eax)>int32_t(ecx)?1:0;compared=true;continue;}
+        if(op==0x0f&&byte()==0xaf){uint8_t form=byte();
+            if(form==0x46){eax*=read32(esi+uint32_t(int32_t(int8_t(byte()))));compared=false;continue;}
+            if(form==0x86){eax*=read32(esi+word());compared=false;continue;}
+            if(form==0x06){eax*=read32(esi);compared=false;continue;}
+        }
+        if(op>=0x7c&&op<=0x7f&&compared){int8_t delta=int8_t(byte());bool taken=op==0x7c?comparison<0:op==0x7d?comparison>=0:op==0x7e?comparison<=0:comparison>0;
+            if(taken){uint32_t target=pc+int32_t(delta);if(target<start||target-start>=65536)throw GuestStop("Generated callback branch outside budget");pc=target;}continue;}
+        if(op==0xc6&&byte()==0x46&&byte()==0&&byte()==0){*static_cast<uint8_t*>(ptr(esi,1))=0;continue;}
+        if(op==0x03||op==0x2b){uint8_t form=byte();uint32_t offset;
+            if(form==0x46)offset=uint32_t(int32_t(int8_t(byte())));else if(form==0x86)offset=word();else if(form==0x06)offset=0;else throw GuestStop("Generated callback arithmetic form pending");
+            if(op==0x03)eax+=read32(esi+offset);else eax-=read32(esi+offset);compared=false;continue;}
+        if(op==0x5e&&stackCleared&&!pending){popped=true;continue;}
+        if(op==0xc3&&popped&&saved&&totalArguments>0&&!arguments){g_eax=eax;g_ecx=ecx;g_esi=originalEsi;g_esp=originalEsp+4;
+            static unsigned completed=0;if(++completed<=3)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Generated x86 callback translated: %08x, %u operations",start,steps+1);
+            return;}
+        uint32_t fault=instruction;
+        if(memory->readable(fault,32)){
+            const auto* raw=static_cast<const uint8_t*>(ptr(fault,32));std::ostringstream dump;
+            for(unsigned i=0;i<32;++i)dump<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(raw[i]);
+            NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Generated callback start=%08x offset=%03x bytes=%s",start,fault-start,dump.str().c_str());
+        }
+        throw GuestStop("Generated callback opcode pending at "+hex(fault));
+    }
+    NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Generated callback budget reached start=%08x pc=%08x arguments=%u",start,pc,arguments);
+    throw GuestStop("Generated callback did not return at "+hex(start));
+}
+void testGeneratedCallbacks(){
+    uint32_t code=allocate(2048),data=allocate(840);std::vector<uint8_t> bytes;
+    auto emit=[&](std::initializer_list<uint8_t> values){bytes.insert(bytes.end(),values.begin(),values.end());};
+    auto word=[&](uint32_t value){for(unsigned i=0;i<4;++i)bytes.push_back(uint8_t(value>>(i*8)));};
+    emit({0x56,0x8b,0x74,0x24,0x08});
+    for(unsigned i=0;i<100;++i){emit({0x56,0xe8});word(generatedTestTarget-(code+uint32_t(bytes.size())+4));emit({0x89,0x46,0x04,0x83,0xc6,0x08});}
+    emit({0x8b,0xb4,0x24});word(408);emit({0x81,0xc6});word(804);
+    emit({0x8b,0x06,0x8b,0x4e,0x04,0x3b,0xc1,0x7f,0x02,0x8b,0xc1,0x0f,0xaf,0x46,0x04,0x89,0x46,0x14,
+        0x03,0x46,0x04,0x89,0x46,0x18,0x2b,0x46,0x04,0x89,0x46,0x1c,0x81,0xc4});word(400);emit({0x5e,0xc3});
+    std::memcpy(ptr(code,bytes.size()),bytes.data(),bytes.size());std::memset(ptr(data,840),0xa5,840);
+    generatedTestActive=true;generatedTestCalls=0;
+    try{
+        for(auto values:{std::array<int32_t,2>{-4,5},std::array<int32_t,2>{-2,-5},std::array<int32_t,2>{INT32_MAX,2}}){
+            write32(data+804,uint32_t(values[0]));write32(data+808,uint32_t(values[1]));
+            uint32_t expected=uint32_t(std::max(values[0],values[1]))*uint32_t(values[1]);
+            if(callGuest(code,{data},4)!=expected||read32(data+824)!=expected||read32(data+828)!=expected+uint32_t(values[1])||read32(data+832)!=expected||read32(data+836)!=0xa5a5a5a5u)
+                throw GuestStop("Generated callback long routine/signed clamp failed");
+        }
+        if(generatedTestCalls!=300)throw GuestStop("Generated callback call count failed");
+    }catch(...){generatedTestActive=false;heaps->free(GuestHeaps::process,code);heaps->free(GuestHeaps::process,data);throw;}
+    generatedTestActive=false;heaps->free(GuestHeaps::process,code);heaps->free(GuestHeaps::process,data);
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Generated callbacks passed 300 calls, long context reload, signed clamps, 32-bit multiply/add/subtract, stack cleanup and guards");
+}
 } // namespace
 
 extern "C" recomp_func_t recomp_lookup(uint32_t va) {
@@ -354,7 +517,14 @@ extern "C" recomp_func_t recomp_lookup(uint32_t va) {
     }
     return nullptr;
 }
-extern "C" recomp_func_t recomp_lookup_manual(uint32_t va) { return nfs_override_lookup(va); }
+extern "C" recomp_func_t recomp_lookup_manual(uint32_t va) {
+    if(timerTestActive&&va==timerTestAddress)return timerTestCallback;
+    if(generatedTestActive&&va==generatedTestTarget)return generatedTestCallback;
+    if(va>=0x10000000u&&va<0x1f000000u&&memory&&memory->readable(va,5)&&read32(va)==0x24748b56u&&*static_cast<const uint8_t*>(ptr(va+4,1))==8){
+        dynamicThunkAddress=va;return dynamicThunk;
+    }
+    return nfs_override_lookup(va);
+}
 extern "C" recomp_func_t recomp_lookup_import(uint32_t va) {
     checkGuestProgress();
     if(va>=soundMethodBase+0x1000&&va<soundMethodBase+0x3000&&!(va%16)){soundToken=va;return soundDispatch;}
@@ -371,12 +541,35 @@ extern "C" recomp_func_t recomp_lookup_import(uint32_t va) {
     return imports[index].function;
 }
 extern "C" void recomp_unresolved(const char* kind,uint32_t va,uint32_t from) {
+    if(from==0x00725520u&&memory){
+        uint32_t node=read32(0x8b446c);
+        for(unsigned i=0;i<12&&node&&memory->readable(node,16);++i){
+            NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Audio callback node=%08x next=%08x prev=%08x function=%08x data=%08x",node,read32(node),read32(node+4),read32(node+8),read32(node+12));
+            node=read32(node);
+        }
+        if(memory->readable(va,24)){
+            auto bytes=static_cast<const uint8_t*>(ptr(va,24));
+            NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Unlifted callback bytes %08x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",va,
+                bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]);
+            if(memory->readable(va,512))for(unsigned part=0;part<8;++part){
+                std::ostringstream dump;for(unsigned i=part*64;i<(part+1)*64;++i)dump<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(bytes[i]);
+                NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Unlifted callback %03x: %s",part*64,dump.str().c_str());
+            }
+        }
+    }
     throw GuestStop(std::string(kind)+" unresolved "+hex(va)+" from "+hex(from));
 }
 extern "C" void recomp_unimpl(uint32_t va,const char* what) {
     throw GuestStop("Instruction unsupported at "+hex(va)+": "+what);
 }
 extern "C" void recomp_dump_trace(const char*) {}
+extern "C" int nfs_android_resolution(){
+    uint32_t width=renderWidth.load(),height=renderHeight.load();if(!width||!height)return 0;
+    if(!memory->writable(arg(0),4)||!memory->writable(arg(1),4))throw GuestStop("Invalid guest resolution outputs");
+    write32(arg(0),width);write32(arg(1),height);ret(0,2);
+    static unsigned calls=0;if(++calls<=3)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest render resolution %ux%u via original selector",width,height);
+    return 1;
+}
 
 std::string connectGuestRuntime(const char* executable) {
     std::unique_lock<std::recursive_mutex> guard(machine);machineLease=&guard;
@@ -384,7 +577,12 @@ std::string connectGuestRuntime(const char* executable) {
     State original; original.save();
     try {
         stopRequested=false;
-        bootDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+        // Interactive Android sessions stop through lifecycle cancellation.
+#ifdef __ANDROID__
+        bootDeadline=std::chrono::steady_clock::time_point::max();
+#else
+        bootDeadline=std::chrono::steady_clock::now()+std::chrono::minutes(5);
+#endif
         recomp_yield_hook=checkGuestProgress;
         memory=std::make_unique<GuestMemory>();
         hostGameRoot=std::string(executable); hostGameRoot=hostGameRoot.substr(0,hostGameRoot.find_last_of('/'));
@@ -402,6 +600,17 @@ std::string connectGuestRuntime(const char* executable) {
         testLiftedCopy();
         testGuestScheduling();
         testGuestInput();
+        testGuestTimers();
+        testGuestFileTime();
+        testGuestCriticalSections();
+        testGeneratedCallbacks();
+        if(renderWidth.load()&&renderHeight.load()){
+            uint32_t outputs=allocate(12);write32(outputs+8,0xdeadbeef);
+            callGuest(0x005bf610,{outputs,outputs+4});
+            if(read32(outputs)!=renderWidth.load()||read32(outputs+4)!=renderHeight.load()||read32(outputs+8)!=0xdeadbeef)throw GuestStop("Guest resolution ABI failed");
+            heaps->free(GuestHeaps::process,outputs);
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest resolution outputs, guard and stdcall stack passed");
+        }
         // Restore a clean CPU state before executing the real CRT entry.
         fresh.load();
         NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Entering actual lifted CRT entry %08x",entry);
@@ -423,9 +632,20 @@ std::string connectGuestRuntime(const char* executable) {
     }
 }
 void requestGuestRuntimeStop() {stopRequested=true;}
+void setGuestPaused(bool paused) {guestPaused=paused;}
+bool guestDrivingControls() {return inputDrivingMode.load();}
 void setGuestDisplaySize(unsigned width,unsigned height){displayWidth=width;displayHeight=height;}
-void setGuestKey(unsigned scan,bool down){if(scan>=256)return;std::lock_guard<std::mutex> lock(inputMutex);if(bool(inputKeys[scan])==down)return;inputKeys[scan]=down?0x80:0;enqueueGuestKey(scan,down);}
-void clearGuestInput(){std::lock_guard<std::mutex> lock(inputMutex);inputKeys.fill(0);inputMouseButtons.fill(0);inputMouseX=inputMouseY=inputMouseZ=0;}
+void setGuestResolution(unsigned width,unsigned height){
+    std::lock_guard<std::recursive_mutex> lock(machine);if(memory)return;
+    if(width<320||height<240||width>8192||height>8192){renderWidth=renderHeight=0;return;}
+    renderWidth=width;renderHeight=height;
+#if defined(__ANDROID__) || defined(NFS_D3D9_BACKEND)
+    setD3D9RenderSize(width,height);
+#endif
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Selected render resolution %ux%u",width,height);
+}
+void setGuestKey(unsigned scan,bool down){if(scan>=256)return;std::lock_guard<std::mutex> lock(inputMutex);if(bool(inputKeys[scan])==down)return;inputKeys[scan]=down?0x80:0;recordInputKey(scan,down);enqueueGuestKey(scan,down);}
+void clearGuestInput(){std::lock_guard<std::mutex> lock(inputMutex);for(unsigned scan=0;scan<256;++scan)if(inputKeys[scan]){recordInputKey(scan,false);enqueueGuestKey(scan,false);}inputKeys.fill(0);inputMouseButtons.fill(0);inputMouseX=inputMouseY=inputMouseZ=0;}
 void setGuestLanguage(const char* language){
     std::lock_guard<std::recursive_mutex> lock(machine);if(memory)return;
     for(const char* known:{"Spanish","English UK","French","German","Italian","Dutch","Swedish","Danish","Japanese","Korean","Chinese (Traditional)","Thai"})

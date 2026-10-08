@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <string>
 #include <cstring>
+#include <thread>
+#include <chrono>
 #include "guest_memory.h"
 #include "game_data.h"
 #include "guest_runtime.h"
@@ -226,9 +228,9 @@ struct Host {
 static void onCommand(android_app* app, int32_t command) {
     auto& h = *static_cast<Host*>(app->userData);
     if (command == APP_CMD_RESUME) { h.resumed = true; h.failed = false; }
-    if (command == APP_CMD_PAUSE) { clearGuestInput();h.resumed = false; h.renderer.stop();acknowledgeD3D9Surface(false);setD3D9HostWindow(nullptr); }
+    if (command == APP_CMD_PAUSE) { setGuestPaused(true);clearGuestInput();h.resumed = false; h.renderer.stop();acknowledgeD3D9Surface(false);setD3D9HostWindow(nullptr); }
     if (command == APP_CMD_TERM_WINDOW || command == APP_CMD_WINDOW_RESIZED || command == APP_CMD_INIT_WINDOW) {
-        h.renderer.stop(); h.failed = false;
+        setGuestPaused(true);h.renderer.stop(); h.failed = false;
         acknowledgeD3D9Surface(false);setD3D9HostWindow(nullptr);
     }
 }
@@ -241,6 +243,7 @@ static int32_t onInput(android_app*,AInputEvent* event){
     case AKEYCODE_ENTER:case AKEYCODE_BUTTON_A:scan=0x1c;break;
     case AKEYCODE_ESCAPE:case AKEYCODE_BACK:case AKEYCODE_BUTTON_B:scan=1;break;
     case AKEYCODE_SPACE:case AKEYCODE_BUTTON_X:scan=0x39;break;
+    case AKEYCODE_DEL:scan=0xe;break;
     case AKEYCODE_SHIFT_LEFT:case AKEYCODE_BUTTON_Y:scan=0x2a;break;
     case AKEYCODE_CTRL_LEFT:scan=0x1d;break;case AKEYCODE_TAB:scan=0xf;break;
     default:{static const unsigned letters[]={0x1e,0x30,0x2e,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1f,0x14,0x16,0x2f,0x11,0x2d,0x15,0x2c};
@@ -256,10 +259,36 @@ extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nat
     setGuestKey(unsigned(scan),down==JNI_TRUE);
     __android_log_print(ANDROID_LOG_INFO,"NFSU2","Android touch DIK=%02x down=%d",unsigned(scan),int(down));
 }
+extern "C" JNIEXPORT jboolean JNICALL Java_com_nfsu2_androidevolved_GameActivity_nativeDrivingControls(JNIEnv*,jclass){return guestDrivingControls()?JNI_TRUE:JNI_FALSE;}
+extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nativeTypeText(JNIEnv* env,jclass,jstring value,jboolean replace){
+    if(!value)return;
+    const jchar* chars=env->GetStringChars(value,nullptr);if(!chars)return;
+    jsize length=env->GetStringLength(value);
+    static constexpr unsigned letterScans[]={0x1e,0x30,0x2e,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1f,0x14,0x16,0x2f,0x11,0x2d,0x15,0x2c};
+    std::vector<unsigned> sequence;if(replace==JNI_TRUE)sequence.insert(sequence.end(),8,0xe);
+    for(jsize i=0;i<length&&i<16;++i){
+        unsigned ch=chars[i],scan=0;
+        if(ch>='a'&&ch<='z')ch-='a'-'A';
+        if(ch>='A'&&ch<='Z')scan=letterScans[ch-'A'];
+        else if(ch>='0'&&ch<='9')scan=ch=='0'?0xb:ch-'0'+1;
+        else if(ch==' ')scan=0x39;
+        if(scan)sequence.push_back(scan);
+    }
+    env->ReleaseStringChars(value,chars);
+    std::thread([sequence=std::move(sequence),length]{
+        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+        for(unsigned scan:sequence){
+            setGuestKey(scan,true);std::this_thread::sleep_for(std::chrono::milliseconds(70));
+            setGuestKey(scan,false);std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        __android_log_print(ANDROID_LOG_INFO,"NFSU2","Android text delivered to guest: %d characters",int(length));
+    }).detach();
+}
 extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nativeLanguage(JNIEnv* env,jclass,jstring language){
     const char* value=env->GetStringUTFChars(language,nullptr);if(!value)return;
     setGuestLanguage(value);env->ReleaseStringUTFChars(language,value);
 }
+extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nativeResolution(JNIEnv*,jclass,jint width,jint height){setGuestResolution(unsigned(width),unsigned(height));}
 void android_main(android_app* app) {
     Host host; app->userData = &host; app->onAppCmd = onCommand;app->onInputEvent=onInput;
     try {
@@ -280,6 +309,7 @@ void android_main(android_app* app) {
         try {
             setD3D9HostWindow(app->window);
             if(d3d9RequestsSurface()){host.renderer.stop();acknowledgeD3D9Surface(true);}
+            setGuestPaused(false);
             if (!host.renderer.device&&!d3d9RequestsSurface()) {
                 checkGameData();
                 host.renderer.start(app->window);

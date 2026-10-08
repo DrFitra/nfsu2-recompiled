@@ -15,6 +15,9 @@
 
 extern "C" IDirect3D9* Direct3DCreate9(UINT sdk);
 extern "C" void dxvkAndroidSetWindow(ANativeWindow* window);
+extern "C" HWND dxvkAndroidGetWindowHandle();
+extern "C" void dxvkAndroidSetRenderSize(uint32_t width,uint32_t height);
+void setD3D9RenderSize(unsigned width,unsigned height){dxvkAndroidSetRenderSize(width,height);}
 #ifndef __ANDROID__
 extern "C" ANativeWindow* dxvkCreateTestWindow();
 extern "C" void dxvkDestroyTestWindow(ANativeWindow* window);
@@ -49,7 +52,7 @@ CompressedView compressionView(uint32_t address){auto found=objects.find(address
 D3DPRESENT_PARAMETERS presentation(uint32_t address){
     auto p=static_cast<const uint32_t*>(pointer(address));if(!p)throw std::runtime_error("Null D3D9 presentation parameters");
     D3DPRESENT_PARAMETERS result{};result.BackBufferWidth=p[0];result.BackBufferHeight=p[1];result.BackBufferFormat=static_cast<D3DFORMAT>(p[2]);result.BackBufferCount=p[3];
-    result.MultiSampleType=static_cast<D3DMULTISAMPLE_TYPE>(p[4]);result.MultiSampleQuality=p[5];result.SwapEffect=static_cast<D3DSWAPEFFECT>(p[6]);result.hDeviceWindow=hostWindow.load();
+    result.MultiSampleType=static_cast<D3DMULTISAMPLE_TYPE>(p[4]);result.MultiSampleQuality=p[5];result.SwapEffect=static_cast<D3DSWAPEFFECT>(p[6]);result.hDeviceWindow=dxvkAndroidGetWindowHandle();
     result.Windowed=p[8];result.EnableAutoDepthStencil=p[9];result.AutoDepthStencilFormat=static_cast<D3DFORMAT>(p[10]);result.Flags=p[11];result.FullScreen_RefreshRateInHz=p[12];result.PresentationInterval=p[13];return result;
 }
 #include "d3d9_locks.inc"
@@ -98,8 +101,23 @@ uint32_t createGuestD3D9(uint32_t sdk){
 uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumentCount){
     uint32_t kind=(token-methodBase)/4096,method=((token-methodBase)%4096)/16;
     auto found=objects.find(args[0]);
-    if(found==objects.end()||static_cast<uint32_t>(found->second.kind)!=kind)throw std::runtime_error("Invalid guest D3D9 COM object");
+    if(found==objects.end()||static_cast<uint32_t>(found->second.kind)!=kind){
+        NFS_RUNTIME_LOG(ANDROID_LOG_ERROR,"NFSU2","Invalid D3D9 COM call object=%08x token=%08x kind=%u method=%u actualKind=%u",args[0],token,kind,method,
+            found==objects.end()?0:static_cast<uint32_t>(found->second.kind));
+        throw std::runtime_error("Invalid guest D3D9 COM object");
+    }
     auto object=found->second.native;
+    // Android may replace ANativeWindow after backgrounding, even at the same
+    // pointer address. Override the destination with this surface generation so
+    // DXVK recreates its presenter while keeping the game's device/resources.
+    if((kind==2&&method==17)||(kind==13&&method==3)){
+        *argumentCount=kind==2?5:6;auto window=dxvkAndroidGetWindowHandle();
+        if(!window)return D3DERR_DEVICELOST;
+        auto source=static_cast<const RECT*>(pointer(args[1])),destination=static_cast<const RECT*>(pointer(args[2]));
+        auto dirty=static_cast<const RGNDATA*>(pointer(args[4]));
+        return kind==2?static_cast<IDirect3DDevice9*>(object)->Present(source,destination,window,dirty):
+            static_cast<IDirect3DSwapChain9*>(object)->Present(source,destination,window,dirty,args[5]);
+    }
     static std::map<uint32_t,uint64_t> methodCalls;auto calls=++methodCalls[token];
     if(calls<=3)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 COM kind=%u method=%u",kind,method);
     if(method==1){*argumentCount=1;++found->second.references;return object->AddRef();}
@@ -133,11 +151,12 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
             if(!hostWindow.load())throw std::runtime_error("D3D9 CreateDevice requires Android surface");
             surfaceRequested=true;auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
             while(!surfaceAvailable){if(std::chrono::steady_clock::now()>deadline)throw std::runtime_error("Android surface handover timed out");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
-            auto window=hostWindow.load();if(!window)return D3DERR_DEVICELOST;
+            auto window=dxvkAndroidGetWindowHandle();if(!window)return D3DERR_DEVICELOST;
             D3DPRESENT_PARAMETERS parameters{};parameters.BackBufferWidth=p[0];parameters.BackBufferHeight=p[1];parameters.BackBufferFormat=static_cast<D3DFORMAT>(p[2]);parameters.BackBufferCount=p[3];
             parameters.MultiSampleType=static_cast<D3DMULTISAMPLE_TYPE>(p[4]);parameters.MultiSampleQuality=p[5];parameters.SwapEffect=static_cast<D3DSWAPEFFECT>(p[6]);parameters.hDeviceWindow=window;
             parameters.Windowed=p[8];parameters.EnableAutoDepthStencil=p[9];parameters.AutoDepthStencilFormat=static_cast<D3DFORMAT>(p[10]);parameters.Flags=p[11];parameters.FullScreen_RefreshRateInHz=p[12];parameters.PresentationInterval=p[13];
             IDirect3DDevice9* device=nullptr;HRESULT status=d3d->CreateDevice(args[1],static_cast<D3DDEVTYPE>(args[2]),window,args[4],&parameters,&device);
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 backbuffer %ux%u CreateDevice result=%08x",parameters.BackBufferWidth,parameters.BackBufferHeight,uint32_t(status));
             write(args[6],SUCCEEDED(status)?wrap(device,Kind::Device):0);return status;
         }
         }

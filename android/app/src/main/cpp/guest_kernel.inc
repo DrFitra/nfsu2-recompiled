@@ -5,7 +5,8 @@ uint32_t processErrorMode{};
 void setErrorMode(){uint32_t old=processErrorMode;processErrorMode=arg(0);ret(old,1);}
 std::array<bool,1088> tlsUsed{};
 thread_local std::array<uint32_t,1088> tlsValues{};
-std::map<uint32_t,std::unique_ptr<std::recursive_mutex>> criticalSections;
+std::map<uint32_t,std::shared_ptr<std::recursive_mutex>> criticalSections;
+std::map<uint32_t,bool> pendingCriticalDeletes;
 uint32_t ansiString(const std::string& value) {
     auto address=allocate(static_cast<uint32_t>(value.size()+1));
     std::memcpy(ptr(address,value.size()+1),value.c_str(),value.size()+1); return address;
@@ -34,7 +35,9 @@ void tlsFree() { uint32_t i=arg(0); bool ok=i<tlsUsed.size() && tlsUsed[i]; if(o
 void tlsGet() {uint32_t i=arg(0); if(i>=tlsUsed.size()||!tlsUsed[i]){lastError=87;ret(0,1);}else{lastError=0;ret(tlsValues[i],1);}}
 void tlsSet() {uint32_t i=arg(0); if(i>=tlsUsed.size()||!tlsUsed[i]){lastError=87;ret(0,2);}else{tlsValues[i]=arg(1);ret(1,2);}}
 void initCritical(uint32_t address,uint32_t spin) {
-    criticalSections[address]=std::make_unique<std::recursive_mutex>();
+    if(criticalSections.count(address)&&read32(address+8))throw GuestStop("Reinitializing active critical section");
+    pendingCriticalDeletes.erase(address);
+    criticalSections[address]=std::make_shared<std::recursive_mutex>();
     std::memset(ptr(address,24),0,24); write32(address+4,UINT32_MAX); write32(address+20,spin);
 }
 void initializeCritical() {initCritical(arg(0),0);ret(0,1);}
@@ -42,15 +45,27 @@ void initializeCriticalSpin() {initCritical(arg(0),arg(1));ret(1,2);}
 void enterCritical() {
     uint32_t address=arg(0); auto cs=criticalSections.find(address);
     if(cs==criticalSections.end()) throw GuestStop("EnterCriticalSection without initialization");
-    while(!cs->second->try_lock()){checkGuestProgress();yieldGuestMachine(1);}
+    auto mutex=cs->second;
+    while(!mutex->try_lock()){checkGuestProgress();yieldGuestMachine(1);}
+    cs=criticalSections.find(address);
+    if(cs==criticalSections.end()||cs->second!=mutex){mutex->unlock();throw GuestStop("Critical section deleted while waiting");}
     auto count=read32(address+8)+1; write32(address+8,count); write32(address+4,count-1); write32(address+12,guestThreadId);ret(0,1);
 }
 void leaveCritical() {
     uint32_t address=arg(0); auto cs=criticalSections.find(address); uint32_t count=read32(address+8);
-    if(cs==criticalSections.end()||!count) throw GuestStop("Unbalanced LeaveCriticalSection");
-    write32(address+8,--count);write32(address+4,count-1);if(!count)write32(address+12,0);cs->second->unlock();ret(0,1);
+    if(cs==criticalSections.end()||!count||read32(address+12)!=guestThreadId) throw GuestStop("Unbalanced LeaveCriticalSection");
+    write32(address+8,--count);write32(address+4,count-1);if(!count)write32(address+12,0);cs->second->unlock();
+    if(!count&&pendingCriticalDeletes.erase(address))criticalSections.erase(cs);
+    ret(0,1);
 }
-void deleteCritical() {if(read32(arg(0)+8)) throw GuestStop("Deleting active critical section");criticalSections.erase(arg(0));ret(0,1);}
+void deleteCritical() {
+    uint32_t address=arg(0);
+    if(read32(address+8)){
+        NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Deferring deletion of active guest critical section %08x owner=%u count=%u",address,read32(address+12),read32(address+8));
+        pendingCriticalDeletes[address]=true;
+    }else{criticalSections.erase(address);pendingCriticalDeletes.erase(address);}
+    ret(0,1);
+}
 void startupInfo() {std::memset(ptr(arg(0),68),0,68);write32(arg(0),68);ret(0,1);}
 void setHandleCount() {ret(arg(0),1);}
 void commandLine() {if(!guestCommandLine)guestCommandLine=ansiString("\"C:\\nfsu2\\SPEED2.EXE\"");ret(guestCommandLine,0);}
@@ -92,7 +107,6 @@ void moduleFileName() {
 }
 void currentDirectory() {const std::string path="C:\\nfsu2"; uint32_t cap=arg(0),out=arg(1);if(cap<=path.size())ret(static_cast<uint32_t>(path.size()+1),2);else{std::memcpy(ptr(out,path.size()+1),path.c_str(),path.size()+1);ret(static_cast<uint32_t>(path.size()),2);}}
 void stdHandle() {uint32_t n=arg(0);ret(n>=0xfffffff4u&&n<=0xfffffff6u?0xf0000200u+(0xfffffff6u-n)*4:UINT32_MAX,1);}
-void fileType() {uint32_t handle=arg(0);if(handle>=0xf0000200u&&handle<=0xf0000208u)ret(2,1);else{lastError=6;ret(0,1);}}
 void consoleMode() {lastError=6;ret(0,2);}
 void currentProcess() {ret(UINT32_MAX,0);}
 void currentThread() {ret(0xfffffffeu,0);}
@@ -119,6 +133,25 @@ void tickCount() {ret(static_cast<uint32_t>(counter()/1000000),0);}
 void performanceCounter() {uint64_t now=counter();std::memcpy(ptr(arg(0),8),&now,8);ret(1,1);}
 void performanceFrequency() {uint64_t frequency=1000000000;std::memcpy(ptr(arg(0),8),&frequency,8);ret(1,1);}
 void systemFileTime() {uint64_t ticks=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count()/100)+116444736000000000ull;std::memcpy(ptr(arg(0),8),&ticks,8);ret(0,1);}
+void fileTimeToLocalFileTime(){
+    uint32_t input=arg(0),output=arg(1);
+    if(input==output||!memory->readable(input,8)||!memory->writable(output,8)){lastError=87;ret(0,2);return;}
+    // GetTimeZoneInformation exposes UTC for the virtual Windows machine.
+    std::memcpy(ptr(output,8),ptr(input,8),8);lastError=0;ret(1,2);
+}
+void fileTimeToSystemTime(){
+    uint32_t input=arg(0),output=arg(1);
+    if(!memory->readable(input,8)||!memory->writable(output,16)){lastError=87;ret(0,2);return;}
+    uint64_t ticks;std::memcpy(&ticks,ptr(input,8),8);
+    if(ticks>=0x8000000000000000ull){lastError=87;ret(0,2);return;}
+    int64_t seconds=static_cast<int64_t>(ticks/10000000ull)-11644473600ll;
+    time_t unixTime=static_cast<time_t>(seconds);std::tm utc{};
+    if(!gmtime_r(&unixTime,&utc)||utc.tm_year+1900>65535){lastError=87;ret(0,2);return;}
+    uint16_t fields[]={uint16_t(utc.tm_year+1900),uint16_t(utc.tm_mon+1),uint16_t(utc.tm_wday),
+        uint16_t(utc.tm_mday),uint16_t(utc.tm_hour),uint16_t(utc.tm_min),uint16_t(utc.tm_sec),
+        uint16_t((ticks%10000000ull)/10000ull)};
+    std::memcpy(ptr(output,16),fields,16);lastError=0;ret(1,2);
+}
 void systemInfo() {uint32_t out=arg(0);std::memset(ptr(out,36),0,36);write32(out+4,4096);write32(out+8,0x10000);write32(out+12,0x7ffeffff);write32(out+16,1);write32(out+20,1);write32(out+24,586);write32(out+28,65536);uint16_t level=6;std::memcpy(ptr(out+32,2),&level,2);ret(0,1);}
 void sleepShim() {
     uint32_t ms=arg(0);if(ms==UINT32_MAX)throw GuestStop("Infinite Sleep requires guest scheduler");
@@ -150,6 +183,16 @@ uint32_t guestPriorityClass=0x20;
 bool processHandle(uint32_t handle){auto alias=kernelHandleAliases.find(handle);return handle==UINT32_MAX||(alias!=kernelHandleAliases.end()&&alias->second==UINT32_MAX);}
 void getPriorityClass(){if(!processHandle(arg(0))){lastError=6;ret(0,1);return;}ret(guestPriorityClass,1);}
 void isBadReadPtr(){ret(memory->readable(arg(0),arg(1))?0:1,2);}
+void isBadWritePtr(){ret(memory->writable(arg(0),arg(1))?0:1,2);}
+void virtualProtect(){
+    uint32_t output=arg(3),old=0,flags=arg(2);
+    if(!output||!memory->writable(output,4)){lastError=87;ret(0,4);return;}
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest VirtualProtect address=%08x bytes=%u protection=%x",arg(0),arg(1),flags);
+    if(flags&~0xffu)throw GuestStop("VirtualProtect modifiers pending: "+hex(flags));
+    if(!memory->protect(arg(0),arg(1),flags,old)){lastError=87;ret(0,4);return;}
+    if(!memory->writable(output,4))throw GuestStop("VirtualProtect old-protection output became inaccessible");
+    write32(output,old);ret(1,4);
+}
 void getTimeZoneInformation(){
     uint32_t output=arg(0);if(!output){lastError=87;ret(UINT32_MAX,1);return;}
     // The virtual Windows machine uses UTC with no daylight-saving transition.
@@ -300,7 +343,7 @@ const std::map<std::string,recomp_func_t> windowFunctions={
     {"GetClientRect",clientRect},{"GetCursorPos",cursorPosition},{"GetSystemMetrics",systemMetrics}
 };
 const std::map<std::string,recomp_func_t> kernelFunctions={
-    {"IsBadReadPtr",isBadReadPtr},{"IsBadWritePtr",isBadReadPtr},
+    {"IsBadReadPtr",isBadReadPtr},{"IsBadWritePtr",isBadWritePtr},{"VirtualProtect",virtualProtect},
     {"CreateMutexA",createMutex},{"ReleaseMutex",releaseMutex},
     {"GetTimeZoneInformation",getTimeZoneInformation},
     {"GetProcessAffinityMask",getProcessAffinityMask},{"SetProcessAffinityMask",setProcessAffinityMask},
@@ -328,5 +371,6 @@ const std::map<std::string,recomp_func_t> kernelFunctions={
     {"WideCharToMultiByte",wideToMulti},{"MultiByteToWideChar",multiToWide},{"GetStringTypeW",stringTypeW},{"LCMapStringW",mapStringW},
     {"GetTickCount",tickCount},{"QueryPerformanceCounter",performanceCounter},
     {"QueryPerformanceFrequency",performanceFrequency},{"GetSystemTimeAsFileTime",systemFileTime},
+    {"FileTimeToLocalFileTime",fileTimeToLocalFileTime},{"FileTimeToSystemTime",fileTimeToSystemTime},
     {"GetSystemInfo",systemInfo},{"Sleep",sleepShim},{"SleepEx",sleepEx},{"ExitProcess",exitProcess},{"OutputDebugStringA",debugString}
 };

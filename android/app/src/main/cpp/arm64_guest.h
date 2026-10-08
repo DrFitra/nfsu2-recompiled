@@ -3,6 +3,18 @@
 #include <time.h>
 #define RECOMP_GENERATED_CODE
 #include "recomp_types.h"
+// The PC's six-resolution selector cannot describe Android display sizes.
+// Intercept its entry for direct calls as well as dispatch calls; no x86 patch.
+extern int nfs_android_resolution(void);
+#undef RECOMP_ENTER
+#define RECOMP_ENTER(va) do { \
+    g_cur_func=(va); RECOMP_FLAGS_IN(); \
+    if((va)==0x005BF610u){ \
+        RECOMP_REGS_OUT(); \
+        if(nfs_android_resolution()){RECOMP_REGS_IN();return;} \
+        RECOMP_REGS_IN(); \
+    } \
+} while(0)
 static inline uint64_t nfs_guest_rdtsc(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);

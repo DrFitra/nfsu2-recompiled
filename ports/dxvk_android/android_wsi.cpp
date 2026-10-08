@@ -20,9 +20,16 @@ struct ANativeWindow {Display* display;Window window;uint32_t width,height;};
 namespace {
 std::mutex windowMutex;
 ANativeWindow* currentWindow=nullptr;
+#ifdef __ANDROID__
+uintptr_t windowGeneration=0x1000;
+#endif
+HWND currentHandle=nullptr;
 uint32_t screenWidth=1280,screenHeight=720;
+uint32_t renderWidth=0,renderHeight=0;
 HMONITOR monitor(){return reinterpret_cast<HMONITOR>(uintptr_t{1});}
 }
+extern "C" void dxvkAndroidSetRenderSize(uint32_t width,uint32_t height){std::lock_guard<std::mutex> guard(windowMutex);renderWidth=width;renderHeight=height;}
+extern "C" HWND dxvkAndroidGetWindowHandle(){std::lock_guard<std::mutex> guard(windowMutex);return currentHandle;}
 extern "C" void dxvkAndroidSetWindow(ANativeWindow* window){
     std::lock_guard<std::mutex> guard(windowMutex);
     if(window==currentWindow)return;
@@ -31,6 +38,11 @@ extern "C" void dxvkAndroidSetWindow(ANativeWindow* window){
     if(currentWindow)ANativeWindow_release(currentWindow);
 #endif
     currentWindow=window;
+#ifdef __ANDROID__
+    currentHandle=window?reinterpret_cast<HWND>(++windowGeneration):nullptr;
+#else
+    currentHandle=window;
+#endif
 }
 #ifndef __ANDROID__
 extern "C" ANativeWindow* dxvkCreateTestWindow(){
@@ -57,7 +69,7 @@ void DxvkPlatformExts::initDeviceExtensions(const DxvkInstance*){}
 namespace dxvk::wsi {
 VkResult createSurface(HWND window,const Rc<vk::InstanceFn>& instance,VkSurfaceKHR* surface){
     std::lock_guard<std::mutex> guard(windowMutex);
-    if(!currentWindow||window!=currentWindow)return VK_ERROR_SURFACE_LOST_KHR;
+    if(!currentWindow||window!=currentHandle)return VK_ERROR_SURFACE_LOST_KHR;
 #ifdef __ANDROID__
     auto create=reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(vkGetInstanceProcAddr(instance->instance(),"vkCreateAndroidSurfaceKHR"));
     if(!create)return VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -78,18 +90,19 @@ bool getCurrentDisplayMode(HMONITOR handle,WsiMode* mode){if(handle!=monitor()||
 bool getDesktopDisplayMode(HMONITOR handle,WsiMode* mode){return getCurrentDisplayMode(handle,mode);}
 bool getDisplayMode(HMONITOR handle,uint32_t index,WsiMode* mode){
     static constexpr uint32_t sizes[][2]={{640,480},{800,600},{1024,768},{1280,720},{1920,1080}};
-    if(handle!=monitor()||!mode)return false;if(index==5)return getCurrentDisplayMode(handle,mode);if(index>=5)return false;
+    if(handle!=monitor()||!mode)return false;if(index==5)return getCurrentDisplayMode(handle,mode);
+    if(index==6){std::lock_guard<std::mutex> guard(windowMutex);if(!renderWidth||!renderHeight)return false;*mode={renderWidth,renderHeight,{60,1},32,false};return true;}if(index>=5)return false;
     *mode={sizes[index][0],sizes[index][1],{60,1},32,false};return true;
 }
-void getWindowSize(HWND window,uint32_t* width,uint32_t* height){std::lock_guard<std::mutex> guard(windowMutex);bool valid=currentWindow&&window==currentWindow;if(width)*width=valid?screenWidth:0;if(height)*height=valid?screenHeight:0;}
+void getWindowSize(HWND window,uint32_t* width,uint32_t* height){std::lock_guard<std::mutex> guard(windowMutex);bool valid=currentWindow&&window==currentHandle;if(width)*width=valid?screenWidth:0;if(height)*height=valid?screenHeight:0;}
 void resizeWindow(HWND window,DxvkWindowState*,uint32_t width,uint32_t height){std::lock_guard<std::mutex> guard(windowMutex);
 #ifdef __ANDROID__
-if(currentWindow&&window==currentWindow)ANativeWindow_setBuffersGeometry(currentWindow,width,height,0);
+if(currentWindow&&window==currentHandle)ANativeWindow_setBuffersGeometry(currentWindow,width,height,0);
 #else
 (void)window;(void)width;(void)height;
 #endif
 }
-bool isWindow(HWND window){std::lock_guard<std::mutex> guard(windowMutex);return currentWindow&&window==currentWindow;}
+bool isWindow(HWND window){std::lock_guard<std::mutex> guard(windowMutex);return currentWindow&&window==currentHandle;}
 HMONITOR getWindowMonitor(HWND window){return isWindow(window)?monitor():nullptr;}
 bool setWindowMode(HMONITOR handle,HWND window,const WsiMode*,bool){return handle==monitor()&&isWindow(window);}
 bool enterFullscreenMode(HMONITOR handle,HWND window,DxvkWindowState*,bool){return handle==monitor()&&isWindow(window);}

@@ -4,9 +4,16 @@ struct GuestThread {
     uint32_t id{},handle{},start{},parameter{},stack{},tib{},exitCode=259,suspended{};
     int32_t priority=0;
     bool started=false,done=false;
-    bool timer=false,periodic=false,cancelled=false;
-    uint32_t delay{},timerId{};
+    bool timer=false;
 };
+struct GuestTimer {
+    uint32_t id,delay,callback,parameter;bool periodic,cancelled=false,running=false,synchronous=false;
+    std::chrono::steady_clock::time_point due;
+};
+std::map<uint32_t,std::shared_ptr<GuestTimer>> timerHandles;
+std::shared_ptr<GuestThread> timerWorker;uint32_t nextTimerId=1;
+thread_local uint32_t runningTimerId=0;
+void runGuestTimers();
 std::vector<std::shared_ptr<GuestThread>> guestThreads;
 std::map<uint32_t,std::shared_ptr<GuestThread>> threadHandles;
 uint32_t nextThreadId=2,nextThreadHandle=0xf0030000;
@@ -48,12 +55,7 @@ void* guestThreadEntry(void* context){
     try {
         while(thread.suspended){checkGuestProgress();yieldGuestMachine(1);}
         if(thread.timer){
-            do {
-                auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(thread.delay);
-                while(!thread.cancelled&&std::chrono::steady_clock::now()<deadline){checkGuestProgress();yieldGuestMachine(1);}
-                if(thread.cancelled)break;
-                callGuest(thread.start,{thread.timerId,0,thread.parameter,0,0});
-            }while(thread.periodic&&!thread.cancelled);
+            runGuestTimers();
             thread.exitCode=0;
         }else thread.exitCode=callGuest(thread.start,{thread.parameter});
     }catch(const GuestStop& error){
@@ -120,29 +122,43 @@ void joinGuestThreads(std::unique_lock<std::recursive_mutex>& lease){
     for(auto& thread:guestThreads)if(thread->started){pthread_join(thread->native,nullptr);thread->started=false;}
     lease.lock();
 }
-std::map<uint32_t,std::shared_ptr<GuestThread>> timerHandles;
-uint32_t nextTimerId=1;
+void runGuestTimers(){
+    while(!stopRequested){
+        checkGuestProgress();std::shared_ptr<GuestTimer> next;
+        for(const auto& entry:timerHandles)if(!entry.second->cancelled&&(!next||entry.second->due<next->due))next=entry.second;
+        if(!next||std::chrono::steady_clock::now()<next->due){yieldGuestMachine(1);continue;}
+        next->running=true;runningTimerId=next->id;
+        try{callGuest(next->callback,{next->id,0,next->parameter,0,0});}
+        catch(...){next->running=false;runningTimerId=0;throw;}
+        next->running=false;runningTimerId=0;
+        if(next->periodic&&!next->cancelled){next->due=std::chrono::steady_clock::now()+std::chrono::milliseconds(next->delay);}
+        else timerHandles.erase(next->id);
+    }
+}
 void timeSetEvent(){
-    reapGuestThreads();
     uint32_t flags=arg(4),delay=arg(0),callback=arg(2);
     if(flags&~0x101u)throw GuestStop("timeSetEvent callback flags pending: "+hex(flags));
-    if(!delay||!recomp_lookup(callback)){ret(0,5);return;}
-    auto thread=std::make_shared<GuestThread>();thread->id=nextThreadId++;thread->timer=true;thread->periodic=flags&1;
-    thread->delay=delay;thread->start=callback;thread->parameter=arg(3);thread->timerId=nextTimerId++;
+    if(!delay||(!recomp_lookup(callback)&&!recomp_lookup_manual(callback))){ret(0,5);return;}
+    uint32_t id=nextTimerId++;auto timer=std::make_shared<GuestTimer>();
+    timer->id=id;timer->delay=delay;timer->callback=callback;timer->parameter=arg(3);timer->periodic=flags&1;timer->synchronous=flags&0x100;
+    timer->due=std::chrono::steady_clock::now()+std::chrono::milliseconds(delay);timerHandles.emplace(id,timer);
+    if(timerWorker){if(timerWorker->done){timerHandles.erase(id);ret(0,5);return;}
+        if(id%500==0)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest timer %u reuses worker thread %u",id,timerWorker->id);ret(id,5);return;}
+    auto thread=std::make_shared<GuestThread>();thread->id=nextThreadId++;thread->timer=true;
     thread->stack=allocate(4u<<20);thread->tib=allocate(4096);
     write32(thread->tib,UINT32_MAX);write32(thread->tib+4,thread->stack+(4u<<20));write32(thread->tib+8,thread->stack);
     write32(thread->tib+0x18,thread->tib);write32(thread->tib+0x20,1);write32(thread->tib+0x24,thread->id);
     pthread_attr_t attributes;int error=pthread_attr_init(&attributes);
     if(!error){error=pthread_attr_setstacksize(&attributes,64u<<20);if(!error)error=pthread_create(&thread->native,&attributes,guestThreadEntry,thread.get());pthread_attr_destroy(&attributes);}
-    if(error){heaps->free(GuestHeaps::process,thread->stack);heaps->free(GuestHeaps::process,thread->tib);ret(0,5);return;}
-    thread->started=true;guestThreads.push_back(thread);timerHandles.emplace(thread->timerId,thread);
-    if(thread->timerId<=3||thread->timerId%500==0)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest timer %u callback=%08x period=%u",thread->timerId,callback,delay);
-    ret(thread->timerId,5);
+    if(error){heaps->free(GuestHeaps::process,thread->stack);heaps->free(GuestHeaps::process,thread->tib);timerHandles.erase(id);ret(0,5);return;}
+    thread->started=true;guestThreads.push_back(thread);timerWorker=thread;
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Created persistent guest timer worker thread %u",thread->id);ret(id,5);
 }
 void timeKillEvent(){
     auto timer=timerHandles.find(arg(0));if(timer==timerHandles.end()){ret(97,1);return;}
-    auto thread=timer->second;thread->cancelled=true;
-    if(thread->id==guestThreadId)throw GuestStop("Synchronous timer self-cancellation pending");
-    while(!thread->done){checkGuestProgress();yieldGuestMachine(1);}
-    timerHandles.erase(timer);ret(0,1);
+    auto value=timer->second;
+    if(value->running&&runningTimerId==value->id&&value->synchronous)throw GuestStop("Synchronous timer self-cancellation pending");
+    value->cancelled=true;
+    if(value->synchronous)while(value->running){checkGuestProgress();yieldGuestMachine(1);}
+    timerHandles.erase(value->id);ret(0,1);
 }

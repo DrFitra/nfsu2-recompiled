@@ -156,14 +156,23 @@ guest threads and Windows API adaptation. An Android port of pinned DXVK native
 translates real D3D9 calls to Vulkan; the original game's initial splash screen
 has rendered on a Samsung SM-S938B. PCM audio uses AAudio and initial touch
 controls deliver keyboard input. The launcher selects an available game
-language before boot, defaulting to Spanish. Game files are read from internal
-storage `nfsu2`. This is still an unfinished port: menu, races, full input/audio
-coverage and lifecycle behavior are not validated. The tested Vulkan driver
+language and render resolution before boot, defaulting to Spanish and the
+active display size. Native size, 75%, 50% and 1280×720 are available. Game files are read from internal
+storage `nfsu2`. The Spanish main menu, car preview, quick-race mode selection
+and loading the persisted `paulo` profile have been observed on the phone.
+Resort Loop now loads into gameplay, with working accelerator input. Optimized
+ARM64 gameplay measured approximately 35–51 presentation FPS at 1170×540.
+The touch overlay provides dedicated driving controls and an editor for saved
+button positions and sizes. Android surface recovery passed a background/resume
+test in the same race process.
+This is still an unfinished port: complete races, full input/audio coverage,
+Bluetooth gamepad support and in-game resolution changes remain pending. The tested Vulkan driver
 advertises 1.3, so a Vulkan-1.1-only device is not yet verified.
 See [Android port status and build instructions](docs/ANDROID_PORT.md) for the
 reference review, implemented pieces and remaining runtime/graphics work.
 See [DXVK preparation](ports/dxvk_android/README.md) for required graphics
-dependencies and [current device evidence](docs/ANDROID_INPUT_AUDIO_TEST.md).
+dependencies, [menu/profile evidence](docs/ANDROID_MENU_PROFILE_TEST.md) and
+[current gameplay/control evidence](docs/ANDROID_GAMEPLAY_CONTROLS_TEST.md).
 
 ## Legal
 

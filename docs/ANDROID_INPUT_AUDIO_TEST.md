@@ -1,5 +1,8 @@
 # Android runtime 0.4.0 — 2026-10-07
 
+For subsequent profile-folder and memory protection work, see
+[runtime 0.5.0](ANDROID_PROFILES_MEMORY_TEST.md).
+
 Current status supersedes the earlier bootstrap and 0.3.0 bring-up reports.
 The locally generated ARM64 APK has rendered the original NFSU2 initial
 splash on Samsung SM-S938B / Adreno 830. This is real guest D3D9 drawing through

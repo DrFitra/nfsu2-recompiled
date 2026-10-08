@@ -15,12 +15,34 @@ file(GLOB GEN_SOURCES CONFIGURE_DEPENDS "${GEN_DIR}/recomp_*.c")
 if(NOT GEN_SOURCES)
     message(FATAL_ERROR "Generate the local game C first; see the project README")
 endif()
-add_library(nfs_guest OBJECT ${GEN_SOURCES})
+# Very large translation units leave one compiler working long after all other
+# jobs finish. Split only those units, preserving complete functions and headers.
+set(ANDROID_GEN_SOURCES)
+foreach(source IN LISTS GEN_SOURCES)
+    file(SIZE "${source}" source_bytes)
+    if(source_bytes GREATER 67108864)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}" "${NFS_ROOT}/scripts/split_android_sources.py")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" "${NFS_ROOT}/scripts/split_android_sources.py"
+            "${source}" "${CMAKE_CURRENT_BINARY_DIR}/split_guest"
+            RESULT_VARIABLE split_status OUTPUT_VARIABLE split_sources OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT split_status EQUAL 0)
+            message(FATAL_ERROR "Failed to split lifted Android source: ${source}")
+        endif()
+        string(REPLACE "\n" ";" split_sources "${split_sources}")
+        list(APPEND ANDROID_GEN_SOURCES ${split_sources})
+    else()
+        list(APPEND ANDROID_GEN_SOURCES "${source}")
+    endif()
+endforeach()
+set_property(GLOBAL PROPERTY JOB_POOLS guest_compile=6)
+add_library(nfs_guest OBJECT ${ANDROID_GEN_SOURCES})
+set_property(TARGET nfs_guest PROPERTY JOB_POOL_COMPILE guest_compile)
 target_include_directories(nfs_guest PRIVATE "${PCRECOMP}/runtime/recomp32" "${GEN_DIR}")
 target_compile_definitions(nfs_guest PRIVATE RECOMP_STRICT_ICALL)
-# Initial ARM64 reference: avoid aliasing assumptions in x86 guest accesses,
+# Optimize the ARM64 game while avoiding aliasing assumptions in x86 accesses;
 # retain unwind tables so unsupported HLE paths can exit to the host cleanly.
-target_compile_options(nfs_guest PRIVATE -O0 -w -fno-strict-aliasing -fexceptions -ffp-contract=off
+target_compile_options(nfs_guest PRIVATE -O2 -w -fno-strict-aliasing -fexceptions -ffp-contract=off
     -include "${CMAKE_CURRENT_SOURCE_DIR}/arm64_guest.h")
 add_library(nfsu2_android SHARED main.cpp guest_runtime.cpp d3d9_bridge.cpp "${NFS_ROOT}/src/runtime/overrides.c" $<TARGET_OBJECTS:nfs_guest>)
 target_include_directories(nfsu2_android SYSTEM PRIVATE "${DXVK_SOURCE}/include/native"
@@ -29,6 +51,6 @@ target_include_directories(nfsu2_android PRIVATE "${PCRECOMP}/runtime/recomp32" 
 target_compile_definitions(nfsu2_android PRIVATE RECOMP_STRICT_ICALL)
 target_compile_features(nfsu2_android PRIVATE cxx_std_17)
 target_compile_definitions(nfsu2_android PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
-target_compile_options(nfsu2_android PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
+target_compile_options(nfsu2_android PRIVATE -O2 -fno-strict-aliasing -ffp-contract=off -Wall -Wextra -Werror -Wno-missing-field-initializers)
 target_link_options(nfsu2_android PRIVATE "-uANativeActivity_onCreate")
 target_link_libraries(nfsu2_android PRIVATE native_app_glue android log vulkan dxvk_android aaudio)

@@ -82,7 +82,7 @@ std::deque<GuestMessage> windowMessages;
 uint32_t messageTime(){return uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
 void enqueueGuestKey(unsigned scan,bool down){
     uint32_t key=0;
-    switch(scan){case 1:key=0x1b;break;case 0x1c:key=13;break;case 0xf:key=9;break;case 0x39:key=32;break;case 0x2a:key=16;break;case 0x1d:key=17;break;case 0x38:key=18;break;
+    switch(scan){case 1:key=0x1b;break;case 0xe:key=8;break;case 0x1c:key=13;break;case 0xf:key=9;break;case 0x39:key=32;break;case 0x2a:key=16;break;case 0x1d:key=17;break;case 0x38:key=18;break;
         case 0xc8:key=0x26;break;case 0xd0:key=0x28;break;case 0xcb:key=0x25;break;case 0xcd:key=0x27;break;
         default:{const unsigned letters[]={0x1e,0x30,0x2e,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1f,0x14,0x16,0x2f,0x11,0x2d,0x15,0x2c};
             for(unsigned i=0;i<26;++i)if(scan==letters[i])key='A'+i;

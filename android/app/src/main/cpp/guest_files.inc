@@ -19,6 +19,12 @@ std::filesystem::path gamePath(std::string guest){
 }
 std::map<uint32_t,int> fileHandles;uint32_t nextFileHandle=0xf0060000;
 bool closeGuestFile(uint32_t handle){auto file=fileHandles.find(handle);if(file==fileHandles.end())return false;::close(file->second);fileHandles.erase(file);return true;}
+void fileType(){
+    uint32_t handle=arg(0);
+    if(handle>=0xf0000200u&&handle<=0xf0000208u){ret(2,1);return;}
+    if(fileHandles.find(handle)!=fileHandles.end()){ret(1,1);return;}
+    lastError=6;ret(0,1);
+}
 void longPath(){
     auto path=gamePath(guestString(arg(0)));std::error_code error;if(!std::filesystem::exists(path,error)){lastError=2;ret(0,3);return;}
     auto relative=path.lexically_relative(std::filesystem::weakly_canonical(hostGameRoot)).string();
@@ -39,6 +45,20 @@ void readFile(){
     if(arg(3))write32(arg(3),0);ssize_t count;do{count=::read(file->second,ptr(arg(1),arg(2)),arg(2));}while(count<0&&errno==EINTR);
     if(count<0){lastError=fileError();ret(0,5);return;}if(arg(3))write32(arg(3),count);ret(1,5);
 }
+void writeFile(){
+    if(arg(4))throw GuestStop("Overlapped WriteFile pending");
+    if(!arg(3)||!memory->writable(arg(3),4)){lastError=87;ret(0,5);return;}write32(arg(3),0);
+    auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,5);return;}
+    if(!memory->readable(arg(1),arg(2))){lastError=1784;ret(0,5);return;}
+    ssize_t count;do{count=::write(file->second,ptr(arg(1),arg(2)),arg(2));}while(count<0&&errno==EINTR);
+    if(count<0){lastError=fileError();ret(0,5);return;}write32(arg(3),uint32_t(count));ret(1,5);
+}
+void flushFileBuffers(){auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,1);return;}
+    int result;do{result=::fsync(file->second);}while(result&&errno==EINTR);if(result){lastError=fileError();ret(0,1);return;}ret(1,1);
+}
+void setEndOfFile(){auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,1);return;}
+    auto position=::lseek(file->second,0,SEEK_CUR);if(position<0||::ftruncate(file->second,position)){lastError=fileError();ret(0,1);return;}ret(1,1);
+}
 void fileSize(){auto file=fileHandles.find(arg(0));struct stat status{};if(file==fileHandles.end()){lastError=6;ret(UINT32_MAX,2);return;}if(fstat(file->second,&status)){lastError=fileError();ret(UINT32_MAX,2);return;}uint64_t size=status.st_size;if(arg(1))write32(arg(1),size>>32);lastError=0;ret(size,2);}
 void fileAttributes(){auto path=gamePath(guestString(arg(0)));struct stat status{};if(stat(path.c_str(),&status)){lastError=fileError();ret(UINT32_MAX,1);return;}ret(S_ISDIR(status.st_mode)?0x10:0x20,1);}
 void setFilePointer(){
@@ -50,7 +70,80 @@ void setFilePointer(){
     if(!high&&uint64_t(result)>UINT32_MAX){lastError=87;ret(UINT32_MAX,4);return;}
     if(high)write32(high,uint64_t(result)>>32);lastError=0;ret(uint32_t(result),4);
 }
+// Keep Windows profile folders alongside the user's game data on Android.
+void shellFolderPath(){
+    uint32_t folder=arg(1),out=arg(4);if(!out||!memory->writable(out,260)){ret(0x80070057u,5);return;}
+    *static_cast<char*>(ptr(out,1))=0;
+    if(arg(2)||arg(3)>1||(folder&~0xc0ffu)){ret(0x80070057u,5);return;}
+    std::string suffix;switch(folder&0xff){case 0x1c:suffix="AppData\\Local";break;case 0x1a:suffix="AppData\\Roaming";break;case 5:suffix="Documents";break;default:ret(0x80070057u,5);return;}
+    std::string logical="C:\\nfsu2\\"+suffix;auto path=gamePath(logical);std::error_code error;
+    if(folder&0x8000)std::filesystem::create_directories(path,error);
+    if(error){ret(0x80070005u,5);return;}
+    if(!(folder&0x4000)&&!std::filesystem::is_directory(path,error)){ret(0x80070003u,5);return;}
+    std::memcpy(ptr(out,logical.size()+1),logical.c_str(),logical.size()+1);
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest profile folder %s",logical.c_str());ret(0,5);
+}
+struct GuestFileSearch {std::vector<std::filesystem::path> paths;size_t next=0;};
+std::map<uint32_t,GuestFileSearch> fileSearches;uint32_t nextSearchHandle=0xf0070000;
+bool filePatternMatches(std::string pattern,std::string name){
+    pattern=lower(pattern);name=lower(name);if(pattern=="*.*")pattern="*";
+    size_t p=0,n=0,star=std::string::npos,retry=0;
+    while(n<name.size()){
+        if(p<pattern.size()&&(pattern[p]=='?'||pattern[p]==name[n])){++p;++n;}
+        else if(p<pattern.size()&&pattern[p]=='*'){star=p++;retry=n;}
+        else if(star!=std::string::npos){p=star+1;n=++retry;}else return false;
+    }while(p<pattern.size()&&pattern[p]=='*')++p;return p==pattern.size();
+}
+bool writeFindData(uint32_t out,const std::filesystem::path& path){
+    if(!out||!memory->writable(out,320)){lastError=87;return false;}
+    struct stat status{};if(::stat(path.c_str(),&status)){lastError=fileError();return false;}
+    auto name=path.filename().string();if(name.size()>=260){lastError=206;return false;}
+    std::memset(ptr(out,320),0,320);write32(out,S_ISDIR(status.st_mode)?0x10:0x20);
+    auto time=[&](uint32_t offset,int64_t seconds){uint64_t ticks=(seconds+11644473600ll)*10000000ull;std::memcpy(ptr(out+offset,8),&ticks,8);};
+    time(4,status.st_ctime);time(12,status.st_atime);time(20,status.st_mtime);
+    uint64_t size=S_ISDIR(status.st_mode)?0:uint64_t(status.st_size);write32(out+28,size>>32);write32(out+32,uint32_t(size));
+    std::memcpy(ptr(out+44,name.size()+1),name.c_str(),name.size()+1);return true;
+}
+void findFirstFile(){
+    auto requested=guestString(arg(0));std::replace(requested.begin(),requested.end(),'\\','/');
+    if(requested.empty()||requested.back()=='/'){lastError=123;ret(UINT32_MAX,2);return;}
+    auto separator=requested.find_last_of('/');auto pattern=requested.substr(separator==std::string::npos?0:separator+1);
+    auto directory=gamePath(separator==std::string::npos?".":requested.substr(0,separator));
+    std::error_code error;GuestFileSearch search;
+    if(std::filesystem::is_directory(directory,error))for(const char* dot:{".",".."})if(filePatternMatches(pattern,dot))search.paths.push_back(directory/dot);
+    for(auto& entry:std::filesystem::directory_iterator(directory,error)){
+        if(!filePatternMatches(pattern,entry.path().filename().string()))continue;
+        // Apply the same containment check used for ordinary file opens.
+        auto logical="C:/nfsu2/"+entry.path().lexically_relative(std::filesystem::weakly_canonical(hostGameRoot)).string();
+        gamePath(logical);search.paths.push_back(entry.path());
+    }
+    if(error){lastError=error==std::errc::no_such_file_or_directory?3:5;ret(UINT32_MAX,2);return;}
+    if(search.paths.empty()){lastError=2;ret(UINT32_MAX,2);return;}
+    std::sort(search.paths.begin(),search.paths.end());
+    if(!writeFindData(arg(1),search.paths.front())){ret(UINT32_MAX,2);return;}
+    search.next=1;uint32_t handle=nextSearchHandle++;fileSearches.emplace(handle,std::move(search));ret(handle,2);
+}
+void findNextFile(){auto found=fileSearches.find(arg(0));if(found==fileSearches.end()){lastError=6;ret(0,2);return;}
+    auto& search=found->second;if(search.next==search.paths.size()){lastError=18;ret(0,2);return;}
+    if(!writeFindData(arg(1),search.paths[search.next])){ret(0,2);return;}++search.next;ret(1,2);
+}
+void findClose(){if(!fileSearches.erase(arg(0))){lastError=6;ret(0,1);return;}ret(1,1);}
+void createDirectory(){if(arg(1))throw GuestStop("CreateDirectory security attributes pending");auto path=gamePath(guestString(arg(0)));
+    if(::mkdir(path.c_str(),0700)){lastError=errno==EEXIST?183:fileError();ret(0,2);return;}ret(1,2);
+}
+void fullPathName(){
+    auto requested=guestString(arg(0));if(requested.empty()){lastError=123;ret(0,4);return;}
+    auto path=gamePath(requested);auto relative=path.lexically_relative(std::filesystem::weakly_canonical(hostGameRoot)).string();
+    std::string logical="C:\\nfsu2";if(relative!="."&&!relative.empty())logical+="\\"+relative;
+    std::replace(logical.begin(),logical.end(),'/','\\');if(requested.back()=='/'||requested.back()=='\\')logical+='\\';
+    uint32_t capacity=arg(1),out=arg(2),part=arg(3);if(capacity<=logical.size()){ret(uint32_t(logical.size()+1),4);return;}
+    if(!out||!memory->writable(out,logical.size()+1)||(part&&!memory->writable(part,4))){lastError=87;ret(0,4);return;}
+    std::memcpy(ptr(out,logical.size()+1),logical.c_str(),logical.size()+1);
+    if(part)write32(part,logical.back()=='\\'?0:out+uint32_t(logical.find_last_of('\\')+1));ret(uint32_t(logical.size()),4);
+}
 const std::map<std::string,recomp_func_t> fileFunctions={
+    {"GetFullPathNameA",fullPathName},{"WriteFile",writeFile},{"FlushFileBuffers",flushFileBuffers},{"SetEndOfFile",setEndOfFile},
+    {"FindFirstFileA",findFirstFile},{"FindNextFileA",findNextFile},{"FindClose",findClose},{"CreateDirectoryA",createDirectory},
     {"SetFilePointer",setFilePointer},
     {"GetLogicalDrives",logicalDrives},{"GetDriveTypeA",driveType},
     {"GetLongPathNameA",longPath},{"CreateFileA",createFile},{"ReadFile",readFile},{"GetFileSize",fileSize},{"GetFileAttributesA",fileAttributes}
