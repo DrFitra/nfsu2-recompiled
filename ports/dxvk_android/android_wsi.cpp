@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "../../android/app/src/main/cpp/android_resolution.h"
 #ifdef __ANDROID__
 #include <android/native_window.h>
 #else
@@ -89,10 +90,17 @@ bool getDesktopCoordinates(HMONITOR handle,RECT* rect){if(handle!=monitor()||!re
 bool getCurrentDisplayMode(HMONITOR handle,WsiMode* mode){if(handle!=monitor()||!mode)return false;std::lock_guard<std::mutex> guard(windowMutex);*mode={screenWidth,screenHeight,{60,1},32,false};return true;}
 bool getDesktopDisplayMode(HMONITOR handle,WsiMode* mode){return getCurrentDisplayMode(handle,mode);}
 bool getDisplayMode(HMONITOR handle,uint32_t index,WsiMode* mode){
-    static constexpr uint32_t sizes[][2]={{640,480},{800,600},{1024,768},{1280,720},{1920,1080}};
-    if(handle!=monitor()||!mode)return false;if(index==5)return getCurrentDisplayMode(handle,mode);
-    if(index==6){std::lock_guard<std::mutex> guard(windowMutex);if(!renderWidth||!renderHeight)return false;*mode={renderWidth,renderHeight,{60,1},32,false};return true;}if(index>=5)return false;
-    *mode={sizes[index][0],sizes[index][1],{60,1},32,false};return true;
+    if(handle!=monitor()||!mode)return false;
+    std::lock_guard<std::mutex> guard(windowMutex);
+    if(!renderWidth||!renderHeight){
+        static constexpr AndroidRenderMode pcModes[]={{640,480},{800,600},{1024,768},{1280,960},{1280,1024},{1600,1200}};
+        if(index>6)return false;
+        auto selected=index==6?AndroidRenderMode{screenWidth,screenHeight}:pcModes[index];
+        *mode={selected.width,selected.height,{60,1},32,false};return true;
+    }
+    if(index>=6)return false;
+    auto sizes=androidRenderModes(screenWidth,screenHeight,renderWidth?renderWidth:screenWidth,renderHeight?renderHeight:screenHeight);
+    *mode={sizes[index].width,sizes[index].height,{60,1},32,false};return true;
 }
 void getWindowSize(HWND window,uint32_t* width,uint32_t* height){std::lock_guard<std::mutex> guard(windowMutex);bool valid=currentWindow&&window==currentHandle;if(width)*width=valid?screenWidth:0;if(height)*height=valid?screenHeight:0;}
 void resizeWindow(HWND window,DxvkWindowState*,uint32_t width,uint32_t height){std::lock_guard<std::mutex> guard(windowMutex);

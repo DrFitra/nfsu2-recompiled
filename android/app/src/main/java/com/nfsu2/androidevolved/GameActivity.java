@@ -98,6 +98,17 @@ public final class GameActivity extends NativeActivity {
     private static native void nativeTypeText(String value, boolean replace);
     private static native void nativeLanguage(String language);
     private static native void nativeResolution(int width, int height);
+    private static native void nativeFrameLimit(int framesPerSecond);
+    private void showFrameLimitOptions() {
+        final int[] limits={0,30,60,120};
+        int saved=getSharedPreferences("performance",MODE_PRIVATE).getInt("frameCap",0),selected=0;
+        for(int i=0;i<limits.length;i++)if(limits[i]==saved)selected=i;
+        new AlertDialog.Builder(this).setTitle("Límite de FPS")
+                .setSingleChoiceItems(new String[]{"Sin límite","30 FPS","60 FPS","120 FPS"},selected,(dialog,which)->{
+                    int cap=limits[which];getSharedPreferences("performance",MODE_PRIVATE).edit().putInt("frameCap",cap).apply();
+                    nativeFrameLimit(cap);dialog.dismiss();
+                }).setNegativeButton("Cancelar",null).show();
+    }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private void showTextInput() {
         EditText name = new EditText(this);
@@ -151,6 +162,7 @@ public final class GameActivity extends NativeActivity {
         String language = getIntent().getStringExtra("language");
         if (language == null) language = getSharedPreferences("launcher", MODE_PRIVATE).getString("language", "Spanish");
         nativeLanguage(language);
+        nativeFrameLimit(getSharedPreferences("performance",MODE_PRIVATE).getInt("frameCap",0));
         status = new TextView(this);
         status.setTextColor(Color.WHITE);
         status.setBackgroundColor(0xb0000000);
@@ -162,7 +174,7 @@ public final class GameActivity extends NativeActivity {
         statusWindow = new PopupWindow(status, ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, false);
         statusWindow.setTouchable(false);
-        touchControls = new RacingControlsView(this, this::setTouchKey, this::showTextInput,this::showTiltOptions);
+        touchControls = new RacingControlsView(this, this::setTouchKey, this::showTextInput,this::showTiltOptions,this::showFrameLimitOptions);
         controlsWindow = new PopupWindow(touchControls, ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT, false);
         controlsWindow.setClippingEnabled(false);

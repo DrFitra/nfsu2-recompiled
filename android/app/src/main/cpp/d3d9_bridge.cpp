@@ -26,7 +26,7 @@ namespace {
 constexpr uint32_t methodBase=0x7e000000;
 enum class Kind:uint32_t {D3D9=1,Device=2,Texture=3,Cube=4,Surface=5,VertexBuffer=6,IndexBuffer=7,
     VertexShader=8,PixelShader=9,Declaration=10,StateBlock=11,Query=12,SwapChain=13,VolumeTexture=14,Volume=15};
-struct Object {IUnknown* native;Kind kind;uint32_t references=1;CompressedView compressed;};
+struct Object {IUnknown* native;Kind kind;uint32_t references=1;CompressedView compressed;uint32_t parent=0;uint32_t children=0;};
 std::map<uint32_t,Object> objects;
 std::map<IUnknown*,uint32_t> addresses;
 void* guestBase;
@@ -46,6 +46,24 @@ uint32_t wrap(IUnknown* native,Kind kind){
 }
 template<class T>T* nativeObject(uint32_t address){if(!address)return nullptr;auto found=objects.find(address);if(found==objects.end())throw std::runtime_error("Invalid D3D9 resource handle");auto native=dynamic_cast<T*>(found->second.native);if(!native)throw std::runtime_error("D3D9 resource interface mismatch");return native;}
 uint32_t wrapTexture(IDirect3DBaseTexture9* texture){if(!texture)return 0;switch(texture->GetType()){case D3DRTYPE_TEXTURE:return wrap(texture,Kind::Texture);case D3DRTYPE_CUBETEXTURE:return wrap(texture,Kind::Cube);case D3DRTYPE_VOLUMETEXTURE:return wrap(texture,Kind::VolumeTexture);default:throw std::runtime_error("Unknown D3D9 base texture type");}}
+void retireGuestObject(uint32_t address){
+    auto found=objects.find(address);if(found==objects.end())return;
+    uint32_t table;std::memcpy(&table,pointer(address),4);
+    freeGuest(table);freeGuest(address);addresses.erase(found->second.native);objects.erase(found);
+}
+void attachTextureSurface(uint32_t texture,uint32_t surface){
+    if(!surface)return;
+    auto& child=objects.at(surface);
+    if(!child.parent){child.parent=texture;++objects.at(texture).children;}
+    else if(child.parent!=texture)throw std::runtime_error("D3D9 subresource changed parent");
+}
+// Underground 2 copies its initial depth surface from 0x870854 into the first
+// render surface descriptor at 0x86e774, then releases both on device Reset.
+// The copy does not call AddRef, so account for that owned descriptor here.
+void retainInitialDepthDescriptor(uint32_t outputAddress,uint32_t surfaceAddress){
+    if(outputAddress!=0x870854||!surfaceAddress)return;
+    auto& surface=objects.at(surfaceAddress);surface.native->AddRef();++surface.references;
+}
 float floatValue(uint32_t bits){float value;std::memcpy(&value,&bits,4);return value;}
 uint32_t floatBits(float value){uint32_t bits;std::memcpy(&bits,&value,4);return bits;}
 CompressedView compressionView(uint32_t address){auto found=objects.find(address);return found==objects.end()?CompressedView{}:found->second.compressed;}
@@ -53,7 +71,7 @@ D3DPRESENT_PARAMETERS presentation(uint32_t address){
     auto p=static_cast<const uint32_t*>(pointer(address));if(!p)throw std::runtime_error("Null D3D9 presentation parameters");
     D3DPRESENT_PARAMETERS result{};result.BackBufferWidth=p[0];result.BackBufferHeight=p[1];result.BackBufferFormat=static_cast<D3DFORMAT>(p[2]);result.BackBufferCount=p[3];
     result.MultiSampleType=static_cast<D3DMULTISAMPLE_TYPE>(p[4]);result.MultiSampleQuality=p[5];result.SwapEffect=static_cast<D3DSWAPEFFECT>(p[6]);result.hDeviceWindow=dxvkAndroidGetWindowHandle();
-    result.Windowed=p[8];result.EnableAutoDepthStencil=p[9];result.AutoDepthStencilFormat=static_cast<D3DFORMAT>(p[10]);result.Flags=p[11];result.FullScreen_RefreshRateInHz=p[12];result.PresentationInterval=p[13];return result;
+    result.Windowed=p[8];result.EnableAutoDepthStencil=p[9];result.AutoDepthStencilFormat=static_cast<D3DFORMAT>(p[10]);result.Flags=p[11];result.FullScreen_RefreshRateInHz=p[12];result.PresentationInterval=D3DPRESENT_INTERVAL_IMMEDIATE;return result;
 }
 #include "d3d9_locks.inc"
 bool compressedFormat(D3DFORMAT format){return format>=D3DFMT_DXT1&&format<=D3DFMT_DXT5;}
@@ -120,8 +138,27 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
     }
     static std::map<uint32_t,uint64_t> methodCalls;auto calls=++methodCalls[token];
     if(calls<=3)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 COM kind=%u method=%u",kind,method);
-    if(method==1){*argumentCount=1;++found->second.references;return object->AddRef();}
-    if(method==2){*argumentCount=1;uint32_t references=object->Release();if(!--found->second.references){uint32_t table;std::memcpy(&table,pointer(args[0]),4);freeGuest(table);freeGuest(args[0]);addresses.erase(object);objects.erase(found);}return references;}
+    // Counts belong to the guest COM wrapper. DXVK texture subresources
+    // delegate AddRef/Release to their parent texture, so native counts can
+    // include ownership through a different guest object. Returning them made
+    // the game's release-until-zero loop call an already freed surface wrapper.
+    if(method==1){*argumentCount=1;object->AddRef();return ++found->second.references;}
+    if(method==2){*argumentCount=1;
+        // The game's detail rebuild releases the cube parent after every face
+        // lookup, although only its first Release owns a parent reference.
+        // Keep the callable wrapper until the acquired faces are released.
+        if(!found->second.references){
+            if(found->second.children)return 0;
+            throw std::runtime_error("D3D9 COM Release without owned reference");
+        }
+        auto nativeReferences=object->Release();uint32_t references=--found->second.references;
+        if(kind==5)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Surface Release object=%08x guestRefs=%u nativeRefs=%u",args[0],references,uint32_t(nativeReferences));
+        if(!references){
+            if(found->second.children)return uint32_t(nativeReferences);
+            auto parent=found->second.parent;retireGuestObject(args[0]);
+            if(parent){auto owner=objects.find(parent);if(owner!=objects.end()&&!--owner->second.children&&!owner->second.references)retireGuestObject(parent);}
+        }
+        return references;}
     if(method==0){
         *argumentCount=3;IUnknown* result=nullptr;HRESULT status=object->QueryInterface(*static_cast<const GUID*>(pointer(args[1])),reinterpret_cast<void**>(&result));
         if(SUCCEEDED(status))write(args[2],wrap(result,found->second.kind));else write(args[2],0);return status;
@@ -154,7 +191,7 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
             auto window=dxvkAndroidGetWindowHandle();if(!window)return D3DERR_DEVICELOST;
             D3DPRESENT_PARAMETERS parameters{};parameters.BackBufferWidth=p[0];parameters.BackBufferHeight=p[1];parameters.BackBufferFormat=static_cast<D3DFORMAT>(p[2]);parameters.BackBufferCount=p[3];
             parameters.MultiSampleType=static_cast<D3DMULTISAMPLE_TYPE>(p[4]);parameters.MultiSampleQuality=p[5];parameters.SwapEffect=static_cast<D3DSWAPEFFECT>(p[6]);parameters.hDeviceWindow=window;
-            parameters.Windowed=p[8];parameters.EnableAutoDepthStencil=p[9];parameters.AutoDepthStencilFormat=static_cast<D3DFORMAT>(p[10]);parameters.Flags=p[11];parameters.FullScreen_RefreshRateInHz=p[12];parameters.PresentationInterval=p[13];
+            parameters.Windowed=p[8];parameters.EnableAutoDepthStencil=p[9];parameters.AutoDepthStencilFormat=static_cast<D3DFORMAT>(p[10]);parameters.Flags=p[11];parameters.FullScreen_RefreshRateInHz=p[12];parameters.PresentationInterval=D3DPRESENT_INTERVAL_IMMEDIATE;
             IDirect3DDevice9* device=nullptr;HRESULT status=d3d->CreateDevice(args[1],static_cast<D3DDEVTYPE>(args[2]),window,args[4],&parameters,&device);
             NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 backbuffer %ux%u CreateDevice result=%08x",parameters.BackBufferWidth,parameters.BackBufferHeight,uint32_t(status));
             write(args[6],SUCCEEDED(status)?wrap(device,Kind::Device):0);return status;
@@ -164,7 +201,8 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
     if(kind==2){auto device=static_cast<IDirect3DDevice9*>(object);switch(method){
         case 9:{*argumentCount=2;D3DDEVICE_CREATION_PARAMETERS p{};HRESULT status=device->GetCreationParameters(&p);if(SUCCEEDED(status)){write(args[1],p.AdapterOrdinal);write(args[1]+4,p.DeviceType);write(args[1]+8,0xf0000301);write(args[1]+12,p.BehaviorFlags);}return status;}
         case 13:{*argumentCount=3;auto p=presentation(args[1]);IDirect3DSwapChain9* result=nullptr;HRESULT status=device->CreateAdditionalSwapChain(&p,&result);write(args[2],SUCCEEDED(status)?wrap(result,Kind::SwapChain):0);return status;}
-        case 16:{*argumentCount=2;auto p=presentation(args[1]);return device->Reset(&p);}
+        case 16:{*argumentCount=2;auto p=presentation(args[1]);auto status=device->Reset(&p);
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 Reset backbuffer %ux%u result=%08x",p.BackBufferWidth,p.BackBufferHeight,uint32_t(status));return status;}
         case 23:{*argumentCount=9;if(args[8])throw std::runtime_error("Shared texture handle pending");if(!args[7])return D3DERR_INVALIDCALL;
             auto original=static_cast<D3DFORMAT>(args[5]),format=nativeTextureFormat(device,original,args[4],D3DRTYPE_TEXTURE);IDirect3DTexture9* texture=nullptr;
             HRESULT status=device->CreateTexture(args[1],args[2],args[3],args[4],format,static_cast<D3DPOOL>(args[6]),&texture,nullptr);
@@ -174,6 +212,7 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
         case 25:{*argumentCount=8;if(args[7])throw std::runtime_error("Shared cube handle pending");if(!args[6])return D3DERR_INVALIDCALL;
             auto original=static_cast<D3DFORMAT>(args[4]),format=nativeTextureFormat(device,original,args[3],D3DRTYPE_CUBETEXTURE);IDirect3DCubeTexture9* texture=nullptr;
             HRESULT status=device->CreateCubeTexture(args[1],args[2],args[3],format,static_cast<D3DPOOL>(args[5]),&texture,nullptr);
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 CreateCubeTexture edge=%u levels=%u usage=%08x format=%u nativeFormat=%u pool=%u status=%08x output=%08x",args[1],args[2],args[3],unsigned(original),unsigned(format),args[5],uint32_t(status),args[6]);
             uint32_t address=SUCCEEDED(status)?wrap(texture,Kind::Cube):0;
             if(address&&format!=original)objects.at(address).compressed.texture=std::make_shared<CompressedTexture>(original,args[1],args[1],texture->GetLevelCount(),6);
             write(args[6],address);return status;}
@@ -181,12 +220,12 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
     }}
     if(kind==3){auto texture=static_cast<IDirect3DTexture9*>(object);
         if(method==17){*argumentCount=3;auto desc=static_cast<D3DSURFACE_DESC*>(pointer(args[2]));HRESULT status=texture->GetLevelDesc(args[1],desc);if(SUCCEEDED(status))describeOriginal(args[0],desc);return status;}
-        if(method==18){*argumentCount=3;IDirect3DSurface9* surface=nullptr;HRESULT status=texture->GetSurfaceLevel(args[1],&surface);uint32_t address=SUCCEEDED(status)?wrap(surface,Kind::Surface):0;if(address){auto view=compressionView(args[0]);view.level=args[1];objects.at(address).compressed=view;}write(args[2],address);return status;}
+        if(method==18){*argumentCount=3;IDirect3DSurface9* surface=nullptr;HRESULT status=texture->GetSurfaceLevel(args[1],&surface);uint32_t address=SUCCEEDED(status)?wrap(surface,Kind::Surface):0;if(address){attachTextureSurface(args[0],address);auto view=compressionView(args[0]);view.level=args[1];objects.at(address).compressed=view;}write(args[2],address);return status;}
         if(method==19){*argumentCount=5;return lockTexture(args[0],args[1],args[2],static_cast<const RECT*>(pointer(args[3])),args[4]);}
         if(method==20){*argumentCount=2;copyLockBack(args[0],args[1]);HRESULT status=texture->UnlockRect(args[1]);releaseLock(args[0],args[1]);return status;}}
     if(kind==4){auto texture=static_cast<IDirect3DCubeTexture9*>(object);
         if(method==17){*argumentCount=3;auto desc=static_cast<D3DSURFACE_DESC*>(pointer(args[2]));HRESULT status=texture->GetLevelDesc(args[1],desc);if(SUCCEEDED(status))describeOriginal(args[0],desc);return status;}
-        if(method==18){*argumentCount=4;IDirect3DSurface9* surface=nullptr;HRESULT status=texture->GetCubeMapSurface(static_cast<D3DCUBEMAP_FACES>(args[1]),args[2],&surface);uint32_t address=SUCCEEDED(status)?wrap(surface,Kind::Surface):0;if(address){auto view=compressionView(args[0]);view.face=args[1];view.level=args[2];objects.at(address).compressed=view;}write(args[3],address);return status;}
+        if(method==18){*argumentCount=4;IDirect3DSurface9* surface=nullptr;HRESULT status=texture->GetCubeMapSurface(static_cast<D3DCUBEMAP_FACES>(args[1]),args[2],&surface);uint32_t address=SUCCEEDED(status)?wrap(surface,Kind::Surface):0;if(address){attachTextureSurface(args[0],address);auto view=compressionView(args[0]);view.face=args[1];view.level=args[2];objects.at(address).compressed=view;}write(args[3],address);return status;}
         if(method==19){*argumentCount=6;return lockCube(args[0],args[1],args[2],args[3],static_cast<const RECT*>(pointer(args[4])),args[5]);}
         if(method==20){*argumentCount=3;uint32_t subresource=args[1]*32+args[2];copyLockBack(args[0],subresource);HRESULT status=texture->UnlockRect(static_cast<D3DCUBEMAP_FACES>(args[1]),args[2]);releaseLock(args[0],subresource);return status;}}
     if(kind==5){auto surface=static_cast<IDirect3DSurface9*>(object);

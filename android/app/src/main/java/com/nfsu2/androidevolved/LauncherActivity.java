@@ -33,6 +33,8 @@ public final class LauncherActivity extends Activity {
     private final ArrayList<String[]> available = new ArrayList<>();
     private Spinner selector;
     private Spinner resolution;
+    private Spinner frameLimit;
+    private static final int[] FRAME_LIMITS={0,30,60,120};
     private final int[][] sizes = new int[4][2];
     private TextView details;
     private Button start;
@@ -69,6 +71,15 @@ public final class LauncherActivity extends Activity {
         sizeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item); resolution.setAdapter(sizeAdapter);
         resolution.setSelection(Math.max(0, Math.min(3, getSharedPreferences("launcher", MODE_PRIVATE).getInt("resolution", 0))));
         layout.addView(resolution);
+        layout.addView(text("Límite de FPS",18));
+        frameLimit=new Spinner(this);frameLimit.setBackgroundColor(Color.rgb(230,234,239));
+        ArrayAdapter<String> frameAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,
+                new String[]{"Sin límite","30 FPS","60 FPS","120 FPS"});
+        frameAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        frameLimit.setAdapter(frameAdapter);
+        int savedCap=getSharedPreferences("performance",MODE_PRIVATE).getInt("frameCap",0);
+        for(int i=0;i<FRAME_LIMITS.length;i++)if(FRAME_LIMITS[i]==savedCap)frameLimit.setSelection(i);
+        layout.addView(frameLimit);
         layout.addView(text("Una resolución inferior reduce la carga de la GPU.", 14));
         details = text("", 15); layout.addView(details);
         Button permission = new Button(this); permission.setText("Dar acceso a la carpeta nfsu2");
@@ -82,6 +93,8 @@ public final class LauncherActivity extends Activity {
             String[] language = available.get(index);
             int size = resolution.getSelectedItemPosition(); if (size < 0 || size >= sizes.length) return;
             getSharedPreferences("launcher", MODE_PRIVATE).edit().putString("language", language[1]).putInt("resolution", size).apply();
+            getSharedPreferences("performance",MODE_PRIVATE).edit()
+                    .putInt("frameCap",FRAME_LIMITS[frameLimit.getSelectedItemPosition()]).apply();
             android.app.ActivityManager manager = (android.app.ActivityManager)getSystemService(ACTIVITY_SERVICE);
             java.util.List<android.app.ActivityManager.RunningAppProcessInfo> processes = manager.getRunningAppProcesses();
             if (processes != null) for (android.app.ActivityManager.RunningAppProcessInfo process : processes) {

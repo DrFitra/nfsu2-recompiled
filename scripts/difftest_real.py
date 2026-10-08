@@ -108,6 +108,10 @@ def main():
     ap.add_argument("--cases", type=int, default=3)
     ap.add_argument("--fp-only", action="store_true"); ap.add_argument("--sse-only", action="store_true")
     ap.add_argument("--func", nargs="*", default=[])
+    ap.add_argument("--local-regs", action="store_true", help="compile with RECOMP_LOCAL_REGS")
+    ap.add_argument("--cc", default="msvc", choices=("msvc", "clang-o2"),
+                    help="msvc: cl /O1 (the Windows build); clang-o2: clang-cl -O2 -fwrapv "
+                         "-fno-strict-aliasing with non-volatile guest memory (the Android build's flags)")
     ap.add_argument("--out", default=os.path.join(HERE, "..", "..", "work", "difftest"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -225,8 +229,14 @@ int main(int argc, char **argv) {
         for fi, regs in cases:
             f.write("%d %s\n" % (fi, " ".join("%x" % regs[r] for r in ("eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"))))
     exe = os.path.join(args.out, "difftest_real.exe")
-    r = subprocess.run(["cl", "-nologo", "-O1", "-w", "-bigobj", "-I" + rt, cpath, "-Fe" + exe, "-Fo" + args.out + os.sep],
-                       capture_output=True, text=True)
+    if args.cc == "clang-o2":
+        cmd = ["clang-cl", "-nologo", "/O2", "-w", "/clang:-fwrapv", "/clang:-fno-strict-aliasing",
+               "/clang:-ffp-contract=off", "-DRECOMP_MEM_QUAL=", "-I" + rt, cpath, "-Fe" + exe, "-Fo" + args.out + os.sep]
+    else:
+        cmd = ["cl", "-nologo", "-O1", "-w", "-bigobj", "-I" + rt, cpath, "-Fe" + exe, "-Fo" + args.out + os.sep]
+    if args.local_regs:
+        cmd.insert(2, "-DRECOMP_LOCAL_REGS")
+    r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         print(r.stdout[-3000:]); sys.exit("compile failed (run from an x64 MSVC environment: source scripts/vsenv.sh x64)")
     out = subprocess.run([exe, os.path.join(args.out, "image.bin"), os.path.join(args.out, "scratch.bin"),

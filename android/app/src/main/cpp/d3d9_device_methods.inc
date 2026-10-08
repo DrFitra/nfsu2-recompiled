@@ -31,7 +31,7 @@ case 36:{*argumentCount=7;IDirect3DSurface9* object5=nullptr;if(args[6])throw st
 case 37:{*argumentCount=3;return device->SetRenderTarget(static_cast<DWORD>(args[1]),nativeObject<IDirect3DSurface9>(args[2]));}
 case 38:{*argumentCount=3;IDirect3DSurface9* object2=nullptr;HRESULT status=device->GetRenderTarget(static_cast<DWORD>(args[1]),args[2]?&object2:nullptr);if(args[2])write(args[2],SUCCEEDED(status)?wrap(object2,Kind::Surface):0);return status;}
 case 39:{*argumentCount=2;return device->SetDepthStencilSurface(nativeObject<IDirect3DSurface9>(args[1]));}
-case 40:{*argumentCount=2;IDirect3DSurface9* object1=nullptr;HRESULT status=device->GetDepthStencilSurface(args[1]?&object1:nullptr);if(args[1])write(args[1],SUCCEEDED(status)?wrap(object1,Kind::Surface):0);return status;}
+case 40:{*argumentCount=2;IDirect3DSurface9* object1=nullptr;HRESULT status=device->GetDepthStencilSurface(args[1]?&object1:nullptr);if(args[1]){uint32_t address=SUCCEEDED(status)?wrap(object1,Kind::Surface):0;write(args[1],address);retainInitialDepthDescriptor(args[1],address);}return status;}
 case 41:{*argumentCount=1;return device->BeginScene();}
 case 42:{*argumentCount=1;return device->EndScene();}
 case 43:{*argumentCount=7;return device->Clear(static_cast<DWORD>(args[1]),static_cast<const D3DRECT*>(pointer(args[2])),static_cast<DWORD>(args[3]),static_cast<D3DCOLOR>(args[4]),floatValue(args[5]),static_cast<DWORD>(args[6]));}

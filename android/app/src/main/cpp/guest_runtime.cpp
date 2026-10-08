@@ -1,4 +1,5 @@
 #include "guest_runtime.h"
+#include "android_resolution.h"
 #include "guest_memory.h"
 #include "guest_heap.h"
 #include "runtime_log.h"
@@ -52,6 +53,7 @@ uint32_t g_icall_trace_idx, g_icall_count;
 namespace {
 std::atomic<uint32_t> displayWidth{1280},displayHeight{720};
 std::atomic<uint32_t> renderWidth{0},renderHeight{0};
+std::atomic<unsigned> frameLimit{0};
 std::string hex(uint32_t va) {
     std::ostringstream out; out << "0x" << std::hex << std::setw(8) << std::setfill('0') << va;
     return out.str();
@@ -190,9 +192,19 @@ void direct3DCreate(){ret(createGuestD3D9(arg(0)),1);}
 void freeD3DGuest(uint32_t address){heaps->free(GuestHeaps::process,address);}
 void d3dDispatch(){uint32_t args[32];for(unsigned i=0;i<32;++i)args[i]=arg(i);uint32_t count=0;uint32_t token=d3dToken;
     static uint64_t bridgeCalls=0;static std::chrono::nanoseconds bridgeTime{};
-    auto bridgeStart=std::chrono::steady_clock::now();uint32_t result=dispatchGuestD3D9(token,args,&count);
+    auto bridgeStart=std::chrono::steady_clock::now();uint32_t result;
+    try{result=dispatchGuestD3D9(token,args,&count);}catch(...){
+        NFS_RUNTIME_LOG(ANDROID_LOG_ERROR,"NFSU2","D3D9 guest caller=%08x stack=%08x token=%08x self=%08x",g_cur_func,g_esp,token,args[0]);throw;}
     bridgeTime+=std::chrono::steady_clock::now()-bridgeStart;++bridgeCalls;
-    if(token==0x7e002110u&&result==0){static unsigned frames=0;static auto since=std::chrono::steady_clock::now();
+    if(token==0x7e002110u&&result==0){
+        static unsigned appliedLimit=0;static auto nextFrame=std::chrono::steady_clock::now();
+        unsigned cap=frameLimit.load(std::memory_order_relaxed);
+        auto now=std::chrono::steady_clock::now();
+        if(cap!=appliedLimit||now>nextFrame+std::chrono::milliseconds(200)){
+            appliedLimit=cap;nextFrame=now;
+        }
+        if(cap){nextFrame+=std::chrono::nanoseconds(1000000000ull/cap);if(nextFrame>now)std::this_thread::sleep_until(nextFrame);}
+        static unsigned frames=0;static auto since=std::chrono::steady_clock::now();
         if(++frames==120){auto now=std::chrono::steady_clock::now();double seconds=std::chrono::duration<double>(now-since).count();
             NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest D3D9 presentation %.1f FPS over %.2f seconds; bridge %.2f ms/frame, %.0f calls/frame",
                 frames/seconds,seconds,double(bridgeTime.count())/1e6/frames,double(bridgeCalls)/frames);
@@ -563,11 +575,30 @@ extern "C" void recomp_unimpl(uint32_t va,const char* what) {
     throw GuestStop("Instruction unsupported at "+hex(va)+": "+what);
 }
 extern "C" void recomp_dump_trace(const char*) {}
+std::array<AndroidRenderMode,6> guestRenderModes{};
+bool firstGameResolution=true;
+void configureAndroidResolutionModes(){
+    guestRenderModes=androidRenderModes(displayWidth.load(),displayHeight.load(),renderWidth.load(),renderHeight.load());
+    const uint32_t labels[]={0x78fa1c,0x78fa14,0x78fa08,0x78f9fc,0x78f9f0,0x78f9e4};
+    const char* original[]={"640x480","800x600","1024x768","1280x960","1280x1024","1600x1200"};
+    for(unsigned i=0;i<6;++i){
+        uint32_t capacity=i<2?8:12;
+        if(std::strcmp(static_cast<const char*>(ptr(labels[i],capacity)),original[i]))throw GuestStop("Unexpected original resolution label");
+        std::memset(ptr(labels[i],capacity),0,capacity);
+        if(i<4)std::snprintf(static_cast<char*>(ptr(labels[i],capacity)),capacity,"%u%%",(i+1)*25);
+        else std::snprintf(static_cast<char*>(ptr(labels[i],capacity)),capacity,"%ux%u",guestRenderModes[i].width,guestRenderModes[i].height);
+        write32(0x800538+i*4,guestRenderModes[i].width);write32(0x800550+i*4,guestRenderModes[i].height);
+    }
+    write32(0x870d1c,5);
+}
 extern "C" int nfs_android_resolution(){
     uint32_t width=renderWidth.load(),height=renderHeight.load();if(!width||!height)return 0;
+    if(firstGameResolution){write32(0x870d1c,5);firstGameResolution=false;}
+    uint32_t index=read32(0x870d1c);if(index>=guestRenderModes.size())throw GuestStop("Invalid Android resolution index");
+    width=guestRenderModes[index].width;height=guestRenderModes[index].height;
     if(!memory->writable(arg(0),4)||!memory->writable(arg(1),4))throw GuestStop("Invalid guest resolution outputs");
     write32(arg(0),width);write32(arg(1),height);ret(0,2);
-    static unsigned calls=0;if(++calls<=3)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest render resolution %ux%u via original selector",width,height);
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest render resolution %ux%u slot=%u via original selector",width,height,index);
     return 1;
 }
 
@@ -594,6 +625,7 @@ std::string connectGuestRuntime(const char* executable) {
         configureD3D9Bridge(memory->base(),allocate,freeD3DGuest);
 #endif
         loadImage(executable);
+        if(renderWidth.load()&&renderHeight.load())configureAndroidResolutionModes();
         memory->commit(stackBase,stackSize); memory->commit(tib,0x1000);
         State fresh; fresh.esp=stackBase+stackSize-64; fresh.fs=tib; fresh.load();
         write32(tib,0xffffffff); write32(tib+4,stackBase+stackSize); write32(tib+8,stackBase); write32(tib+0x18,tib);
@@ -608,6 +640,9 @@ std::string connectGuestRuntime(const char* executable) {
             uint32_t outputs=allocate(12);write32(outputs+8,0xdeadbeef);
             callGuest(0x005bf610,{outputs,outputs+4});
             if(read32(outputs)!=renderWidth.load()||read32(outputs+4)!=renderHeight.load()||read32(outputs+8)!=0xdeadbeef)throw GuestStop("Guest resolution ABI failed");
+            for(uint32_t i=0;i<6;++i){write32(0x870d1c,i);callGuest(0x005bf610,{outputs,outputs+4});
+                if(read32(outputs)!=guestRenderModes[i].width||read32(outputs+4)!=guestRenderModes[i].height||read32(outputs+8)!=0xdeadbeef)throw GuestStop("Guest resolution slot/guard check failed");}
+            write32(0x870d1c,5);firstGameResolution=true;
             heaps->free(GuestHeaps::process,outputs);
             NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest resolution outputs, guard and stdcall stack passed");
         }
@@ -643,6 +678,10 @@ void setGuestResolution(unsigned width,unsigned height){
     setD3D9RenderSize(width,height);
 #endif
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Selected render resolution %ux%u",width,height);
+}
+void setGuestFrameLimit(unsigned framesPerSecond){
+    frameLimit=(framesPerSecond==30||framesPerSecond==60||framesPerSecond==120)?framesPerSecond:0;
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Android frame limit %u FPS (0 means uncapped)",frameLimit.load());
 }
 void setGuestKey(unsigned scan,bool down){if(scan>=256)return;std::lock_guard<std::mutex> lock(inputMutex);if(bool(inputKeys[scan])==down)return;inputKeys[scan]=down?0x80:0;recordInputKey(scan,down);enqueueGuestKey(scan,down);}
 void clearGuestInput(){std::lock_guard<std::mutex> lock(inputMutex);for(unsigned scan=0;scan<256;++scan)if(inputKeys[scan]){recordInputKey(scan,false);enqueueGuestKey(scan,false);}inputKeys.fill(0);inputMouseButtons.fill(0);inputMouseX=inputMouseY=inputMouseZ=0;}

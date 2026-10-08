@@ -11,3 +11,4 @@ void clearGuestInput();
 bool guestDrivingControls();
 void setGuestLanguage(const char* language);
 void setGuestResolution(unsigned width,unsigned height);
+void setGuestFrameLimit(unsigned framesPerSecond);

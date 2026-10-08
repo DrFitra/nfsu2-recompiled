@@ -6,3 +6,10 @@ target_compile_features(graphics_memory_check PRIVATE cxx_std_17)
 target_include_directories(graphics_memory_check SYSTEM PRIVATE "${NFS_ROOT}/build/dxvk-source/include/native/windows"
   "${NFS_ROOT}/build/dxvk-source/include/native/directx")
 target_compile_options(graphics_memory_check PRIVATE -Wall -Wextra -Werror)
+add_executable(graphics_com_check com_lifetime.cpp)
+target_compile_features(graphics_com_check PRIVATE cxx_std_17)
+target_include_directories(graphics_com_check SYSTEM PRIVATE "${NFS_ROOT}/build/dxvk-source/include/native/windows"
+  "${NFS_ROOT}/build/dxvk-source/include/native/directx")
+if(ANDROID)
+  target_link_libraries(graphics_com_check PRIVATE log)
+endif()

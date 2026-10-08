@@ -289,6 +289,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nat
     setGuestLanguage(value);env->ReleaseStringUTFChars(language,value);
 }
 extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nativeResolution(JNIEnv*,jclass,jint width,jint height){setGuestResolution(unsigned(width),unsigned(height));}
+extern "C" JNIEXPORT void JNICALL Java_com_nfsu2_androidevolved_GameActivity_nativeFrameLimit(JNIEnv*,jclass,jint cap){setGuestFrameLimit(unsigned(cap));}
 void android_main(android_app* app) {
     Host host; app->userData = &host; app->onAppCmd = onCommand;app->onInputEvent=onInput;
     try {

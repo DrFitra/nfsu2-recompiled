@@ -21,6 +21,7 @@ final class RacingControlsView extends View {
     private final Keys keys;
     private final Runnable textInput;
     private final Runnable configureTilt;
+    private final Runnable configureFrameLimit;
     private String style;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final ArrayList<Control> controls = new ArrayList<>();
@@ -46,10 +47,10 @@ final class RacingControlsView extends View {
             area = new RectF(x, y, x+w, y+h); original=new RectF(area); this.glyph=glyph; this.label=label; this.scan=scan;
         }
     }
-    RacingControlsView(Context context, Keys keys, Runnable textInput, Runnable configureTilt) {
+    RacingControlsView(Context context, Keys keys, Runnable textInput, Runnable configureTilt, Runnable configureFrameLimit) {
         super(context); this.keys=keys; this.textInput=textInput;
         layouts=context.getSharedPreferences("touch_layouts_v1",Context.MODE_PRIVATE);
-        style=layouts.getString("style","classic");this.configureTilt=configureTilt;
+        style=layouts.getString("style","classic");this.configureTilt=configureTilt;this.configureFrameLimit=configureFrameLimit;
         setContentDescription("Controles del juego: cambia entre menú y conducción");
     }
     private void add(float x, float y, float w, float h, String glyph, String label, int scan) {
@@ -210,9 +211,9 @@ final class RacingControlsView extends View {
     }
     private void showOptions() {
         new AlertDialog.Builder(getContext()).setTitle("Opciones de controles")
-                .setItems(new String[]{"Estilo: clásico / Xbox / PlayStation","Conducción por inclinación","Guardar layout con nombre","Cargar layout personalizado"},(dialog,which)->{
+                .setItems(new String[]{"Estilo: clásico / Xbox / PlayStation","Conducción por inclinación","Límite de FPS","Guardar layout con nombre","Cargar layout personalizado"},(dialog,which)->{
                     if(which==0)chooseStyle();else if(which==1)configureTilt.run();
-                    else if(which==2)saveNamedLayout();else loadNamedLayout();
+                    else if(which==2)configureFrameLimit.run();else if(which==3)saveNamedLayout();else loadNamedLayout();
                 }).setNegativeButton("Cerrar",null).show();
     }
     private void chooseStyle() {
